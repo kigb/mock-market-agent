@@ -1,0 +1,55 @@
+import assert from 'node:assert/strict';
+const url=process.env.ARENA_TEST_URL||'http://127.0.0.1:5173';
+const api=async(path,method='GET',body,token)=>{const r=await fetch(url+'/api/arena/'+path,{method,headers:{...(body?{'Content-Type':'application/json'}:{}),...(token?{'X-Arena-Token':token}:{})},body:body?JSON.stringify(body):undefined});const d=await r.json();return {status:r.status,...d};};
+const rpc=async(method,params)=>{const r=await fetch(url+'/mcp',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});assert.equal(r.status,200);return r.json();};
+const rules=await api('rules');assert.equal(rules.ticker,'MOCK');assert.equal(rules.durationSeconds,60);assert.equal(rules.openingPrice,null);assert.equal(rules.botIntervalSeconds,10);assert.equal(rules.scoringMode,'closing_midpoint');assert.equal(rules.botExecutionMode,'best_worst_50_50');assert.equal(rules.botBestProbability,.5);assert.equal(rules.botWorstProbability,.5);assert.deepEqual(rules.botQuantityRange,[1,5]);
+const discovery=await rpc('server/discover',{});assert.ok(discovery.result.supportedVersions.includes('2026-07-28'));
+const init=await rpc('initialize',{protocolVersion:'2025-06-18'});assert.equal(init.result.protocolVersion,'2025-06-18');
+const tools=await rpc('tools/list',{});assert.ok(tools.result.tools.find(t=>t.name==='place_order'));assert.ok(tools.result.tools.find(t=>t.name==='record_decision'));
+const created=await api('games','POST',{agents:[{name:'Alice API',provider:'external'},{name:'Bob API',provider:'external'},{name:'Charlie API',provider:'external'},{name:'Dara API',provider:'external'}]});assert.equal(created.status,201);assert.equal(created.state.lastPrice,null);assert.deepEqual(created.state.series,[]);assert.equal(created.state.settlementPrice,null);assert.equal(created.state.valuation.price,null);assert.equal(created.state.valuation.source,'unpriced');assert.equal(created.state.atlas.maxAttempts,6);assert.equal(created.state.atlas.executionMode,'best_worst_50_50');assert.deepEqual(created.state.atlas.ticks,[]);
+const {id}=created.state,host=created.hostToken,[a,b,c,d]=created.agentTokens;
+assert.equal((await api('games/'+id)).status,401);const firstRead=await api('games/'+id,'GET',undefined,host),secondRead=await api('games/'+id,'GET',undefined,host);assert.equal(firstRead.revision,secondRead.revision);assert.equal(firstRead.revision,0);
+assert.equal((await api('games/'+id+'/start','POST',{},a.token)).status,401);
+assert.equal((await api('games/'+id+'/orders','POST',{side:'buy',type:'limit',quantity:1,price:49},a.token)).status,409);
+const started=await api('games/'+id+'/start','POST',{},host);assert.equal(started.state.status,'running');assert.equal(started.state.endsAt-started.state.startedAt,60000);assert.equal(started.state.book.bids.length,0);
+const results=await Promise.all(Array.from({length:16},(_,i)=>api('games/'+id+'/orders','POST',{side:'buy',type:'limit',price:40+i*.01,quantity:1,requestId:'concurrent-'+i},[a,b,c,d][i%4].token)));assert.ok(results.every(x=>x.status===200));
+const observed=await api('games/'+id+'/book','GET',undefined,a.token);assert.equal(observed.result.openOrders.length,4);assert.equal(observed.result.rules.botWorstProbability,.5);assert.equal(observed.result.atlas.executionMode,'best_worst_50_50');assert.ok(!JSON.stringify(observed.state).includes(a.token));
+const other=await api('games/'+id+'/orders/'+observed.result.openOrders[0].id,'DELETE',undefined,b.token);assert.equal(other.status,404);
+const canceled=await api('games/'+id+'/orders/'+observed.result.openOrders[0].id,'DELETE',undefined,a.token);assert.equal(canceled.status,200);
+const mcp=await rpc('tools/call',{name:'place_order',arguments:{gameId:id,agentToken:a.token,side:'sell',quantity:7,type:'limit',price:60,requestId:'mcp-quote'}});assert.equal(mcp.result.isError,false);assert.ok(mcp.result.structuredContent.result.orderId);
+const invalid=await rpc('tools/call',{name:'place_order',arguments:{gameId:id,agentToken:a.token,side:'buy',quantity:1.5,price:101}});assert.equal(invalid.result.isError,true);
+const duplicate=await api('games/'+id+'/orders','POST',{side:'sell',quantity:7,type:'limit',price:60,requestId:'mcp-quote'},a.token);assert.equal(duplicate.result.orderId,mcp.result.structuredContent.result.orderId);
+await api('games/'+id+'/cancel','POST',{},a.token);assert.equal((await api('games/'+id+'/book','GET',undefined,a.token)).result.openOrders.length,0);
+const tokenUsage=await rpc('tools/call',{name:'record_decision',arguments:{gameId:id,agentToken:a.token,latencyMs:123,inputTokens:10,outputTokens:5,requestId:'external-metrics'}});assert.equal(tokenUsage.result.isError,false);assert.equal(tokenUsage.result.structuredContent.state.agents[0].calls,1);
+const origin=await fetch(url+'/mcp',{method:'POST',headers:{'Content-Type':'application/json',Origin:'https://evil.example'},body:'{}'});assert.equal(origin.status,403);
+const exported=await fetch(url+'/api/arena/games/'+id+'/export',{method:'POST',headers:{'X-Arena-Token':host}});assert.equal(exported.status,200);assert.ok(exported.headers.get('Content-Disposition').includes('attachment'));const report=await exported.json();assert.ok(!JSON.stringify(report).includes(host));assert.equal(report.rules.ticker,'MOCK');
+console.log('PASS: REST + MCP discovery, registration, ownership, token privacy, 16 concurrent orders, cancellations, duplicate receipts, origin checks, and external telemetry.');
+
+const defaults=await api('defaults');assert.equal(defaults.agents.length,8);assert.equal(typeof defaults.available,'boolean');assert.ok(!JSON.stringify(defaults).includes('apiKey'));
+const presets=defaults.agents;
+assert.equal((await api('games','POST',{agents:[{...presets[0],model:'other'}]})).status,400);
+assert.equal((await api('games','POST',{agents:[{...presets[0]},{...presets[0],name:'Copy'}]})).status,400);
+const presetGame=await api('games','POST',{agents:presets});assert.equal(presetGame.status,201);assert.equal(presetGame.state.agents.length,8);
+await api('games/'+presetGame.state.id+'/start','POST',{},presetGame.hostToken);
+const wrongConfig=await api('games/'+presetGame.state.id+'/decide','POST',{config:{provider:'sail',model:presets[0].model,apiKey:'TEST_ONLY',prompt:'override'}},presetGame.agentTokens[0].token);assert.equal(wrongConfig.status,400);assert.match(wrongConfig.error,/fixed server configuration/);
+const custom=await api('games','POST',{agents:[{name:'Own key',provider:'sail',model:presets[0].model}]});await api('games/'+custom.state.id+'/start','POST',{},custom.hostToken);assert.equal((await api('games/'+custom.state.id+'/decide','POST',{},custom.agentTokens[0].token)).status,400);
+console.log('PASS: eight fixed default slots, no duplicate slots, no client override, and custom agents never inherit the shared key.');
+
+const memoryGame=await api('games','POST',{agents:Array.from({length:4},(_,i)=>({name:'Memory '+i,provider:'baseline',strategy:'maker',intervalMs:500}))});
+assert.equal(memoryGame.status,201);const memoryId=memoryGame.state.id;
+await api('games/'+memoryId+'/start','POST',{},memoryGame.hostToken);
+const memoryTurns=await Promise.all(memoryGame.agentTokens.map(a=>api('games/'+memoryId+'/decide','POST',{},a.token)));
+assert.ok(memoryTurns.every(t=>t.status===200));
+for(const agent of memoryGame.agentTokens){
+ const own=await api('games/'+memoryId+'/history?agentId='+agent.id,'GET',undefined,agent.token);assert.equal(own.status,200);assert.equal(own.messages.length,5);assert.equal(own.messages[0].message.role,'user');assert.equal(own.messages[1].message.role,'assistant');assert.equal(own.messages[1].message.tool_calls.length,3);
+ assert.deepEqual(own.messages.slice(2).map(e=>e.message.tool_call_id),own.messages[1].message.tool_calls.map(c=>c.id));assert.ok(own.messages.slice(2).every(e=>JSON.parse(e.message.content).ok));assert.ok(!JSON.stringify(own).includes(agent.token));
+ const asHost=await api('games/'+memoryId+'/history?agentId='+agent.id,'GET',undefined,memoryGame.hostToken);assert.deepEqual(asHost.messages,own.messages);
+}
+assert.equal((await api('games/'+memoryId+'/history?agentId='+memoryGame.agentTokens[1].id,'GET',undefined,memoryGame.agentTokens[0].token)).status,403);
+assert.equal((await api('games/'+memoryId+'/history?agentId='+memoryGame.agentTokens[0].id)).status,401);
+await new Promise(resolve=>setTimeout(resolve,520));
+await api('games/'+memoryId+'/decide','POST',{},memoryGame.agentTokens[0].token);
+const historyAgain=await api('games/'+memoryId+'/history','GET',undefined,memoryGame.agentTokens[0].token);assert.equal(historyAgain.messages.length,10);assert.equal(historyAgain.messages[0].step,0);assert.notEqual(historyAgain.messages[0].decisionId,historyAgain.messages[5].decisionId);
+const allHistories=await fetch(url+'/api/arena/games/'+memoryId+'/export',{method:'POST',headers:{'X-Arena-Token':memoryGame.hostToken}}).then(r=>r.json());assert.equal(allHistories.trajectories.length,4);assert.equal(allHistories.trajectories[0].messages.length,10);
+const privateExport=await fetch(url+'/api/arena/games/'+memoryId+'/export',{method:'POST',headers:{'X-Arena-Token':memoryGame.agentTokens[0].token}}).then(r=>r.json());assert.equal(privateExport.trajectories.length,1);assert.equal(privateExport.trajectories[0].agentId,memoryGame.agentTokens[0].id);
+console.log('PASS: concurrent transcript writes are atomic, full history survives subsequent turns, host access works, and opponents cannot read or export another agent conversation.');

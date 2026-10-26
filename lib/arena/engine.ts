@@ -1,0 +1,126 @@
+import {defaultAgent} from './presets.ts';
+export const TICKER = 'MOCK';
+export const DURATION = 60_000;
+export const BOT_INTERVAL_MS = 10_000;
+const LEGACY_SETTLEMENT_CENTS = 5000;
+export type Side = 'buy' | 'sell';
+export type AgentSpec = {preset?:string;name:string;provider:'baseline'|'modal'|'sail'|'fireworks'|'external';model?:string;strategy?:'maker'|'mean_reversion'|'momentum';intervalMs?:number};
+export type Agent = AgentSpec & {id:string;token:string;cash:number;position:number;average:number;realized:number;orders:number;submittedQuantity:number;filledQuantity:number;fills:number;makerFills:number;takerFills:number;cancellations:number;expired:number;peakPosition:number;peakPnl:number;maxDrawdown:number;calls:number;historyMessages?:number;errors:number;latencyMs:number;latencySamples:number;promptTokens:number;completionTokens:number;lastDecision:number;leaseUntil:number;leaseId:string;requestWindow:number;requestCount:number};
+export type Order = {id:string;agentId:string;side:Side;price:number;quantity:number;originalQuantity:number;sequence:number;time:number};
+export type BotSelection = 'best'|'worst';
+export type BotTick = {time:number;side:Side;selection:BotSelection;requestedQuantity:number;filledQuantity:number;canceledQuantity:number;averageFillPrice:number|null;bestAvailablePrice:number|null;worstAvailablePrice:number|null;executions:{price:number;quantity:number;maker:string}[]};
+export type Fill = {id:number;time:number;price:number;quantity:number;side:Side;maker:string;taker:string;botSelection?:BotSelection};
+export type Event = {id:number;time:number;agentId:string;type:'order'|'fill'|'cancel'|'decision'|'error'|'system';message:string};
+export type Intent = {action:'place_order'|'cancel_order'|'cancel_all'|'wait'|'get_rules'|'get_order_book'|'get_position';side?:Side;type?:'limit'|'market';quantity?:number;price?:number;orderId?:string;reason?:string};
+export type Valuation={price:number|null;source:'midpoint'|'last_trade'|'unpriced'|'legacy_fixed'|'realized_only';bestBid:number|null;bestAsk:number|null};
+export type Game = {schema:2|3|4|5;id:string;hostToken:string;owner:string;createdAt:number;status:'lobby'|'running'|'finished';startedAt:number|null;endsAt:number|null;finishedAt:number|null;seed:number;rng:number;sequence:number;botAt:number;botAttempts:number;botTicks?:BotTick[];agents:Agent[];orders:Order[];fills:Fill[];events:Event[];receipts:{agentId:string;id:string;result:unknown}[];series:{time:number;price:number;volume:number}[];lastPrice:number|null;firstPrice?:number|null;volume:number;finalBook:ReturnType<typeof orderBook>|null;closingValuation?:Valuation};
+export class ArenaError extends Error {status:number;constructor(message:string,status=400){super(message);this.name='ArenaError';this.status=status;}}
+export function random(g:Game){g.rng=(Math.imul(g.rng,1664525)+1013904223)>>>0;return g.rng/4294967296;}
+export function cents(value:unknown){if(typeof value!=='number'||!Number.isFinite(value)||value<0||value>100||Math.abs(value*100-Math.round(value*100))>0.000001)throw new ArenaError('Price must be between 0 and 100, in 0.01 ticks.');return Math.round(value*100);}
+export function newAgent(spec:AgentSpec,id:string,token:string):Agent {
+  if(!spec||typeof spec!=='object')throw new ArenaError('Invalid agent configuration.');
+  const preset=spec.preset===undefined?undefined:defaultAgent(spec.preset);
+  if(spec.preset!==undefined&&!preset)throw new ArenaError('Unknown arena-provided agent.');
+  if(preset&&(spec.provider!==preset.provider||spec.model!==preset.model||(spec.intervalMs!==undefined&&spec.intervalMs!==preset.intervalMs)))throw new ArenaError('Arena-provided models and decision intervals are fixed. Add your own agent to customize a model.');
+  if(preset)spec={...spec,...preset,name:spec.name};
+  if(spec.model!==undefined&&typeof spec.model!=='string')throw new ArenaError('Model ID must be a string.');
+  if(typeof spec.name!=='string'||!spec.name.trim()||spec.name.trim().length>32)throw new ArenaError('Agent names must be 1–32 characters.');
+  if(!['baseline','modal','sail','fireworks','external'].includes(spec.provider))throw new ArenaError('Unknown agent provider.');
+  const intervalMs=spec.intervalMs??2000;
+  if(!Number.isInteger(intervalMs)||intervalMs<500||intervalMs>10000)throw new ArenaError('Decision interval must be 500–10,000 ms.');
+  if(spec.provider==='baseline'&&!['maker','mean_reversion','momentum'].includes(spec.strategy||''))throw new ArenaError('Choose a baseline strategy.');
+  if(!['baseline','external'].includes(spec.provider)&&(typeof spec.model!=='string'||!spec.model.trim()||spec.model.length>200))throw new ArenaError('Enter the provider’s model ID.');
+  return {preset:spec.preset,name:spec.name.trim(),provider:spec.provider,model:spec.model?.slice(0,200),strategy:spec.strategy,intervalMs,id,token,cash:0,position:0,average:0,realized:0,orders:0,submittedQuantity:0,filledQuantity:0,fills:0,makerFills:0,takerFills:0,cancellations:0,expired:0,peakPosition:0,peakPnl:0,maxDrawdown:0,calls:0,errors:0,latencyMs:0,latencySamples:0,promptTokens:0,completionTokens:0,lastDecision:0,leaseUntil:0,leaseId:'',requestWindow:0,requestCount:0};
+}
+export function addEvent(g:Game,time:number,agentId:string,type:Event['type'],message:string){g.events.push({id:++g.sequence,time,agentId,type,message:message.slice(0,250)});g.events=g.events.slice(-400);}
+export function createGame(id:string,hostToken:string,owner:string,specs:AgentSpec[],now:number,seed=42):Game {
+  if(!Array.isArray(specs)||specs.length>8)throw new ArenaError('Use up to eight competing agents.');
+  if(!Number.isInteger(seed)||seed<0||seed>2147483647)throw new ArenaError('Seed must be an integer from 0 to 2147483647.');
+  const g:Game={schema:5,id,hostToken,owner,createdAt:now,status:'lobby',startedAt:null,endsAt:null,finishedAt:null,seed,rng:seed,sequence:0,botAt:0,botAttempts:0,botTicks:[],agents:[],orders:[],fills:[],events:[],receipts:[],series:[],lastPrice:null,firstPrice:null,volume:0,finalBook:null};
+  for(const spec of specs)addAgent(g,spec,crypto.randomUUID(),crypto.randomUUID(),now);
+  g.agents.push(newAgent({name:'Atlas',provider:'external'},'$atlas',''));
+  addEvent(g,now,'$system','system','Lobby created. One ticker. Sixty seconds.');return g;
+}
+export function addAgent(g:Game,spec:AgentSpec,id:string,token:string,now:number){if(g.status!=='lobby')throw new ArenaError('Agents must register before the game starts.',409);if(g.agents.filter(a=>a.id!=='$atlas').length>=8)throw new ArenaError('This arena is full (8 agents).',409);if(typeof spec?.name!=='string')throw new ArenaError('Enter an agent name.');if(spec.name.trim().toLowerCase()==='atlas')throw new ArenaError('Atlas is reserved for the system bot.');if(g.agents.some(a=>a.name.toLowerCase()===spec.name.trim().toLowerCase()))throw new ArenaError('Use a unique agent name.');if(spec.preset&&g.agents.some(a=>a.preset===spec.preset))throw new ArenaError('Each arena-provided agent can appear only once per game.');const a=newAgent(spec,id,token);g.agents.push(a);addEvent(g,now,a.id,'system',`${a.name} joined the arena.`);return a;}
+export function startGame(g:Game,now:number){if(g.status!=='lobby')throw new ArenaError('This game has already started.',409);if(g.agents.length<2)throw new ArenaError('Register at least one competing agent before starting.');g.status='running';g.startedAt=now;g.endsAt=now+DURATION;g.botAt=now;addEvent(g,now,'$system','system','Game started. Orders close in 60 seconds.');}
+export function sorted(g:Game,side:Side){return g.orders.filter(o=>o.side===side).sort((a,b)=>(side==='buy'?b.price-a.price:a.price-b.price)||a.sequence-b.sequence);}
+export function orderBook(g:Game){
+ const levels=(side:Side)=>{const rows=new Map<number,{price:number;quantity:number;orders:number}>();for(const o of sorted(g,side)){const r=rows.get(o.price)||{price:o.price/100,quantity:0,orders:0};r.quantity+=o.quantity;r.orders++;rows.set(o.price,r);}return [...rows.values()];};
+ const bids=levels('buy'),asks=levels('sell');return {ticker:TICKER,bids,asks,bestBid:bids[0]?.price??null,bestAsk:asks[0]?.price??null,spread:bids.length&&asks.length?Math.round((asks[0].price-bids[0].price)*100)/100:null};
+}
+export function pnl(a:Agent,legacy=false,mark?:number|null){return mark!=null?a.cash+a.position*mark:legacy?a.cash+a.position*LEGACY_SETTLEMENT_CENTS:a.realized;}
+function marketValuation(g:Game):Valuation{
+ const bestBid=sorted(g,'buy')[0]?.price??null,bestAsk=sorted(g,'sell')[0]?.price??null;
+ return {price:bestBid!==null&&bestAsk!==null?(bestBid+bestAsk)/2:g.lastPrice,source:bestBid!==null&&bestAsk!==null?'midpoint':g.lastPrice!==null?'last_trade':'unpriced',bestBid,bestAsk};
+}
+export function valuation(g:Game):Valuation{
+ if(g.schema===2)return {price:LEGACY_SETTLEMENT_CENTS,source:'legacy_fixed',bestBid:null,bestAsk:null};
+ if(g.schema===3)return {price:null,source:'realized_only',bestBid:null,bestAsk:null};
+ return g.status==='finished'&&g.closingValuation?g.closingValuation:marketValuation(g);
+}
+function revalue(g:Game){if(g.schema<4)return;const mark=valuation(g).price;for(const a of g.agents){const score=pnl(a,false,mark);a.peakPnl=Math.max(a.peakPnl,score);a.maxDrawdown=Math.max(a.maxDrawdown,a.peakPnl-score);}}
+function publicValuation(g:Game){const v=valuation(g);return {...v,price:v.price===null?null:v.price/100,bestBid:v.bestBid===null?null:v.bestBid/100,bestAsk:v.bestAsk===null?null:v.bestAsk/100,frozen:g.status==='finished'};}
+function account(a:Agent,side:Side,qty:number,price:number,maker:boolean,legacy=false,market=false){const change=side==='buy'?qty:-qty,old=a.position;
+ if(!old||Math.sign(old)===Math.sign(change))a.average=(a.average*Math.abs(old)+price*qty)/(Math.abs(old)+qty);
+ else{a.realized+=Math.min(Math.abs(old),qty)*(price-a.average)*Math.sign(old);if(qty>Math.abs(old))a.average=price;if(qty===Math.abs(old))a.average=0;}
+ a.position+=change;a.cash-=change*price;a.filledQuantity+=qty;a.fills++;if(maker)a.makerFills++;else a.takerFills++;
+ a.peakPosition=Math.max(a.peakPosition,Math.abs(a.position));if(!market){a.peakPnl=Math.max(a.peakPnl,pnl(a,legacy));a.maxDrawdown=Math.max(a.maxDrawdown,a.peakPnl-pnl(a,legacy));}
+}
+export function match(g:Game,a:Agent,side:Side,type:'limit'|'market',quantity:number,price:number|null,now:number,selection:BotSelection='best'){
+ if(selection!=='best'&&selection!=='worst')throw new ArenaError('Unknown execution selection.');
+ if(selection==='worst'&&(a.id!=='$atlas'||g.schema<5||type!=='market'||price!==null))throw new ArenaError('Only Atlas may use worst-first execution.');
+ if(a.id==='$atlas'&&g.schema>=5&&(!Number.isInteger(quantity)||quantity<1||quantity>5))throw new ArenaError('Atlas quantity must be 1–5 contracts per attempt.');
+ let remaining=quantity,notional=0,filled=0;const id='ord_'+(++g.sequence);
+ a.orders++;a.submittedQuantity+=quantity;
+ const priority=sorted(g,side==='buy'?'sell':'buy');
+ if(selection==='worst')priority.sort((x,y)=>(side==='buy'?y.price-x.price:x.price-y.price)||x.sequence-y.sequence);
+ for(const resting of priority){
+  if(!remaining)break;if(price!==null&&(side==='buy'?resting.price>price:resting.price<price))break;
+  if(resting.agentId===a.id){g.orders=g.orders.filter(o=>o.id!==resting.id);a.cancellations++;addEvent(g,now,a.id,'cancel',`Self-match prevention canceled ${resting.id}.`);continue;}
+  const qty=Math.min(remaining,resting.quantity),maker=g.agents.find(x=>x.id===resting.agentId)!;
+  resting.quantity-=qty;remaining-=qty;filled+=qty;notional+=qty*resting.price;
+  account(a,side,qty,resting.price,false,g.schema===2,g.schema>=4);account(maker,side==='buy'?'sell':'buy',qty,resting.price,true,g.schema===2,g.schema>=4);
+  const f:Fill={id:++g.sequence,time:now,price:resting.price,quantity:qty,side,maker:maker.id,taker:a.id,...(a.id==='$atlas'&&g.schema>=5?{botSelection:selection}:{})};g.fills.push(f);g.lastPrice=f.price;if(g.firstPrice==null)g.firstPrice=f.price;g.volume+=qty;g.series.push({time:now,price:f.price/100,volume:g.volume});
+  addEvent(g,now,a.id,'fill',`${a.name}${a.id==='$atlas'&&g.schema>=5?' ['+selection+' price]':''} ${side==='buy'?'bought':'sold'} ${qty} @ ${(f.price/100).toFixed(2)} from ${maker.name}.`);
+ }
+ g.orders=g.orders.filter(o=>o.quantity>0);
+ if(remaining&&type==='limit')g.orders.push({id,agentId:a.id,side,price:price!,quantity:remaining,originalQuantity:quantity,sequence:g.sequence,time:now});
+ g.fills=g.fills.slice(-1200);
+ g.series=g.series.slice(-500);revalue(g);
+ return {orderId:id,filledQuantity:filled,remainingQuantity:type==='limit'?remaining:0,canceledQuantity:type==='market'?remaining:0,averageFillPrice:filled?notional/filled/100:null,status:remaining?(type==='limit'?(filled?'partially_filled':'open'):(filled?'partially_filled':'unfilled')):'filled'};
+}
+export function ensureRunning(g:Game,now:number){if(g.status!=='running'||now>=g.endsAt!)throw new ArenaError(g.status==='lobby'?'Start the game before submitting orders.':'The 60-second game has ended. Late orders are rejected.',409);}
+export function advance(g:Game,now:number){if(g.status!=='running')return;const until=Math.min(now,g.endsAt!);const interval=g.schema===2?1000:BOT_INTERVAL_MS;while(g.botAt+interval<=until){g.botAt+=interval;g.botAttempts++;const a=g.agents.find(a=>a.id==='$atlas')!,side=random(g)>.5?'buy':'sell',qty=1+Math.floor(random(g)*5),selection:BotSelection=g.schema>=5&&random(g)>=.5?'worst':'best';const available=sorted(g,side==='buy'?'sell':'buy'),bestAvailablePrice=available.length?available[0].price/100:null,worstAvailablePrice=available.length?available.at(-1)!.price/100:null,priorFill=g.fills.at(-1)?.id??0;const result=match(g,a,side,'market',qty,null,g.botAt,selection);if(g.schema>=5){(g.botTicks??=[]).push({time:g.botAt,side,selection,requestedQuantity:qty,filledQuantity:result.filledQuantity,canceledQuantity:result.canceledQuantity,averageFillPrice:result.averageFillPrice,bestAvailablePrice,worstAvailablePrice,executions:g.fills.filter(f=>f.id>priorFill).map(f=>({price:f.price/100,quantity:f.quantity,maker:f.maker}))});addEvent(g,g.botAt,a.id,'system',`Atlas ${side.toUpperCase()} · ${selection} price · requested ${qty}, filled ${result.filledQuantity}.`);}}
+ if(now>=g.endsAt!){g.finalBook=orderBook(g);if(g.schema>=4)g.closingValuation=marketValuation(g);for(const o of g.orders){const a=g.agents.find(a=>a.id===o.agentId)!;a.expired++;}g.orders=[];g.status='finished';g.finishedAt=g.endsAt;revalue(g);for(const a of g.agents){a.leaseId='';a.leaseUntil=0;}addEvent(g,g.endsAt!,'$system','system',g.schema===2?'Legacy game finished at its fixed settlement. Leaderboard frozen.':g.schema===3?'Historical realized-only round finished.':`Game finished. Closing reference: ${g.closingValuation!.price===null?'unpriced':(g.closingValuation!.price/100).toFixed(3)} (${g.closingValuation!.source}). Total P&L frozen.`);}
+}
+function throttle(a:Agent,now:number){const window=Math.floor(now/1000);if(a.requestWindow!==window){a.requestWindow=window;a.requestCount=0;}if(++a.requestCount>20)throw new ArenaError('Maximum 20 trading actions per agent per second.',429);}
+export function intent(g:Game,a:Agent,input:Intent,now:number,requestId?:string){
+ if(requestId){if(typeof requestId!=='string'||requestId.length>100)throw new ArenaError('Request IDs must be strings up to 100 characters.');const prior=g.receipts.find(r=>r.id===requestId&&r.agentId===a.id);if(prior)return prior.result;}
+ ensureRunning(g,now);throttle(a,now);let result:unknown;
+ if(input.action==='wait'){result={status:'waiting'};}
+ else if(input.action==='cancel_all'){const own=g.orders.filter(o=>o.agentId===a.id);g.orders=g.orders.filter(o=>o.agentId!==a.id);a.cancellations+=own.length;result={status:'canceled',canceled:own.length};addEvent(g,now,a.id,'cancel',`Canceled ${own.length} open orders.`);}
+ else if(input.action==='cancel_order'){const o=g.orders.find(o=>o.id===input.orderId&&o.agentId===a.id);if(!o)throw new ArenaError('Order not found, already filled, or not owned by this agent.',404);g.orders=g.orders.filter(x=>x.id!==o.id);a.cancellations++;result={status:'canceled',orderId:o.id};addEvent(g,now,a.id,'cancel',`Canceled ${o.id}.`);}
+ else if(input.action==='place_order'){
+  if(!['buy','sell'].includes(input.side||''))throw new ArenaError('Side must be buy or sell.');const type=input.type??'limit';if(!['limit','market'].includes(type))throw new ArenaError('Order type must be limit or market.');
+  if(!Number.isInteger(input.quantity)||input.quantity!<1||input.quantity!>1000)throw new ArenaError('Quantity must be an integer from 1 to 1,000.');
+  const price=type==='limit'?cents(input.price):null;
+  if(g.orders.filter(o=>o.agentId===a.id).length>=50)throw new ArenaError('Cancel an order before placing another (50 open orders maximum).');
+  result=match(g,a,input.side!,type,input.quantity!,price,now);addEvent(g,now,a.id,'order',`${input.side!.toUpperCase()} ${input.quantity} ${TICKER} · ${type==='market'?'market':(price!/100).toFixed(2)}`);
+ }else throw new ArenaError('Unknown trading action.');
+ if(requestId){g.receipts.push({agentId:a.id,id:requestId,result});g.receipts=g.receipts.slice(-500);}revalue(g);return result;
+}
+export function agentStats(a:Agent,legacy=false,mark?:number|null){return {id:a.id,preset:a.preset,name:a.name,provider:a.provider,model:a.model,strategy:a.strategy,intervalMs:a.intervalMs,position:a.position,cash:a.cash/100,averageEntry:a.position?a.average/100:null,realizedPnl:a.realized/100,pnl:pnl(a,legacy,mark)/100,unrealizedPnl:mark==null?null:a.position*(mark-a.average)/100,entryNotional:Math.abs(a.position)*a.average/100,orders:a.orders,submittedQuantity:a.submittedQuantity,filledQuantity:a.filledQuantity,fills:a.fills,makerFills:a.makerFills,takerFills:a.takerFills,cancellations:a.cancellations,expiredOrders:a.expired,fillRate:a.submittedQuantity?a.filledQuantity/a.submittedQuantity:0,peakPosition:a.peakPosition,maxDrawdown:a.maxDrawdown/100,calls:a.calls,historyMessages:a.historyMessages??0,errors:a.errors,averageLatencyMs:a.latencySamples?a.latencyMs/a.latencySamples:0,promptTokens:a.promptTokens,completionTokens:a.completionTokens};}
+const BEST_ONLY_BOT='Historical Atlas: every 10 seconds it randomly buys or sells 1–5 contracts at the best available prices, using normal price priority. It never quotes.';
+export function rulesFor(g:Game){
+ const rules=g.schema>=5?RULES:{...RULES,botExecutionMode:'best' as const,botBestProbability:1,botWorstProbability:0,bot:BEST_ONLY_BOT,matching:'Price priority, then FIFO. Market orders sweep available prices; any unfilled market quantity is canceled. Limit remainders rest. Self-matches cancel your resting leg.'};
+ if(g.schema===2)return {...rules,openingPrice:50,botIntervalSeconds:1,bot:'Legacy Atlas: once per second, 60 best-price attempts.',scoring:'Legacy game: cash + position × 50.00.',scoringMode:'legacy_fixed' as const};
+ if(g.schema===3)return {...rules,scoring:'Historical round: realized P&L only; open inventory is not valued.',scoringMode:'realized' as const};
+ return rules;
+}
+function botInfo(g:Game){const ticks=g.botTicks??[];return {executionMode:g.schema>=5?'best_worst_50_50' as const:'best' as const,bestAttempts:g.schema>=5?ticks.filter(t=>t.selection==='best').length:g.botAttempts,worstAttempts:ticks.filter(t=>t.selection==='worst').length,bestFilledQuantity:g.schema>=5?ticks.filter(t=>t.selection==='best').reduce((q,t)=>q+t.filledQuantity,0):g.agents.find(a=>a.id==='$atlas')!.filledQuantity,worstFilledQuantity:ticks.filter(t=>t.selection==='worst').reduce((q,t)=>q+t.filledQuantity,0),ticks};}
+export function publicState(g:Game,now:number){
+ const legacy=g.schema===2,mark=valuation(g).price,scoreMode=g.schema===2?'legacy_fixed' as const:g.schema===3?'realized' as const:'closing_midpoint' as const,agents=g.agents.filter(a=>a.id!=='$atlas').map(a=>agentStats(a,legacy,mark)),leaderboard=[...agents].sort((a,b)=>b.pnl-a.pnl||b.filledQuantity-a.filledQuantity||a.name.localeCompare(b.name)).map((a,i)=>({...a,rank:i+1}));
+ return {id:g.id,ticker:TICKER,status:g.status,createdAt:g.createdAt,startedAt:g.startedAt,endsAt:g.endsAt,finishedAt:g.finishedAt,now,remainingMs:g.status==='lobby'?DURATION:Math.max(0,g.endsAt!-now),durationMs:DURATION,seed:g.seed,rules:rulesFor(g),scoringMode:scoreMode,valuation:publicValuation(g),settlementPrice:legacy?LEGACY_SETTLEMENT_CENTS/100:g.status==='finished'&&mark!==null?mark/100:null,botIntervalMs:legacy?1000:BOT_INTERVAL_MS,lastPrice:g.lastPrice===null?null:g.lastPrice/100,firstPrice:legacy?(g.series[0]?.price??null):(g.firstPrice==null?null:g.firstPrice/100),volume:g.volume,book:g.status==='finished'?g.finalBook!:orderBook(g),agents,leaderboard,atlas:{...agentStats(g.agents.find(a=>a.id==='$atlas')!,legacy,mark),...botInfo(g),attempts:g.botAttempts,maxAttempts:DURATION/(legacy?1000:BOT_INTERVAL_MS)},fills:g.fills.slice(-100).reverse().map(f=>({...f,price:f.price/100,makerName:g.agents.find(a=>a.id===f.maker)?.name,takerName:g.agents.find(a=>a.id===f.taker)?.name})),events:g.events.slice(-100).reverse(),series:g.series};
+}
+export function observation(g:Game,a:Agent,now:number){return {gameId:g.id,ticker:TICKER,status:g.status,remainingMs:g.status==='lobby'?DURATION:Math.max(0,g.endsAt!-now),serverTime:now,rules:rulesFor(g),atlas:{...botInfo(g),intervalMs:g.schema===2?1000:BOT_INTERVAL_MS,attempts:g.botAttempts},scoringMode:rulesFor(g).scoringMode,valuation:publicValuation(g),lastPrice:g.lastPrice===null?null:g.lastPrice/100,book:g.status==='finished'?g.finalBook!:orderBook(g),position:agentStats(a,g.schema===2,valuation(g).price),openOrders:g.orders.filter(o=>o.agentId===a.id).map(o=>({...o,price:o.price/100})),recentFills:g.fills.slice(-10).reverse().map(f=>({...f,price:f.price/100}))};}
+export const RULES={ticker:TICKER,durationSeconds:60,priceRange:[0,100],tickSize:0.01,quantityRange:[1,1000],openingPrice:null,startingCash:0,startingInventory:0,longShort:true,fees:0,maxAgents:8,maxOpenOrders:50,maxActionsPerSecond:20,botIntervalSeconds:10,botExecutionMode:'best_worst_50_50' as const,botBestProbability:0.5,botWorstProbability:0.5,botQuantityRange:[1,5],botSideBuyProbability:0.5,scoringMode:'closing_midpoint' as const,matching:'Agent orders use price priority, then FIFO. Market orders sweep available prices; any unfilled quantity is canceled. Limit remainders rest. Self-matches cancel your resting leg. Atlas alone may reverse price priority for its disclosed worst-first executions; FIFO at equal prices is unchanged.',liquidity:'The book and trade history start empty. No opening price or fixed fundamental value is supplied. Competing agents choose all quotes. The first execution establishes the first traded price. No hidden market maker or quote refill.',bot:'Atlas is the only system bot. Every 10 seconds (10, 20, 30, 40, 50, 60), independently sample buy/sell (50/50), a total quantity from 1–5 contracts, and best-first/worst-first execution (50/50). Best buy: lowest asks first; worst buy: highest asks first. Best sell: highest bids first; worst sell: lowest bids first. At equal prices fill oldest orders first. Sweep in the chosen order until the sampled quantity is filled or that side is empty; cancel any remainder. The cap applies across all fills in that attempt. Atlas never quotes or creates liquidity. Worst-first is an explicit exception only for Atlas. All agents are told this mechanism; choices and fills are recorded. The seed determines the random sequence; probabilities do not guarantee exactly three attempts of each mode per game.',scoring:'Final total P&L = cash + position × closing reference price. After the final scheduled Atlas attempt, capture the remaining book before expiring orders. With both sides present, reference = (best bid + best ask) / 2. If either side is missing, use the last executed price. With no two-sided book and no trades, the reference is undefined and all zero-inventory scores are zero. Keep half-tick precision. Realized and unrealized P&L are reported separately; realized P&L is already included in cash, so do not add it again. Inventory is valued without creating liquidation trades. Live P&L uses the same rule on the current book and is provisional. Quotes can influence the closing reference; this is a market mark.',deadline:'Agent actions must arrive before the server deadline. The closing book, reference price, and scores freeze after 60 seconds; then unfilled orders expire. Atlas ticks advance on API access by server timestamps, including all six scheduled attempts when finalizing.',ties:'Equal total P&L ranks by filled quantity, then agent name.'};
