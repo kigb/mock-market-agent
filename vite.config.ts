@@ -17,6 +17,8 @@ const managedLinux = readExecutionProfile() === "managed-linux";
 const localBindingConfig = {
   main: "./build/sites-worker.ts",
   compatibility_flags: ["nodejs_compat"],
+  // Every minute, finalize arena games past their deadline even when no client is polling.
+  triggers: { crons: ["* * * * *"] },
   d1_databases: d1
     ? [
         {

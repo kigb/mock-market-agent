@@ -58,3 +58,7 @@ next-env.d.ts
 /market/
 __pycache__/
 *.pyc
+
+# Local Worker secrets (SAIL_API_KEY for the preview); never commit.
+.dev.vars
+.dev.vars.*

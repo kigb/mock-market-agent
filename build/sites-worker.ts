@@ -1,8 +1,13 @@
 import handler from "vinext/server/fetch-handler";
 import { runWithConnectorBinding } from "../lib/connector-context";
 import type { ConnectorBinding } from "../lib/connector-contract.mjs";
+import { finalizeDue } from "../lib/arena/store";
 
 export default {
+  // Cron trigger (see vite.config.ts `triggers`): settle games whose deadline passed with no client request.
+  async scheduled(_controller: ScheduledController, _env: Cloudflare.Env, ctx: ExecutionContext) {
+    ctx.waitUntil(finalizeDue().then(r => { if (r.finalized.length) console.log("Finalized due arena games", r.finalized); }));
+  },
   fetch(request: Request, env: Cloudflare.Env, ctx: ExecutionContext<{ CONNECTORS?: ConnectorBinding }>) {
     let binding = ctx.props?.CONNECTORS;
     // Local preview emulates the same request-scoped capability. This branch and

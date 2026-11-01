@@ -111,21 +111,47 @@ class ArenaMCP:
         except (URLError, TimeoutError) as exc:
             raise MCPError(f'Arena connection failed: {type(exc).__name__}') from None
 
+    def _rest_text(self, path: str, token: str | None = None) -> str:
+        """GET a text resource such as the round log (text/markdown)."""
+        headers = {'Accept': 'text/markdown, text/plain', 'User-Agent': 'MarketArenaAgent/2.0'}
+        if token:
+            headers['X-Arena-Token'] = token
+        if self.service_token:
+            headers['OAI-Sites-Authorization'] = 'Bearer ' + self.service_token
+        try:
+            with urlopen(Request(self.origin+'/api/arena/'+path, None, headers), timeout=30, context=TLS_CONTEXT) as response:
+                return response.read().decode('utf-8', errors='replace')
+        except HTTPError as exc:
+            raise MCPError(f'Arena HTTP {exc.code} fetching {path}.') from None
+        except (URLError, TimeoutError) as exc:
+            raise MCPError(f'Arena connection failed: {type(exc).__name__}') from None
+
     def _rest_tool(self, name: str, a: dict):
         if name == 'get_rules':
             return self._rest('rules')
         if name == 'create_game':
-            return self._rest('games', 'POST', {'seed': a.get('seed', 42), 'agents': []})
+            body = {'seed': a.get('seed', 42), 'agents': []}
+            if a.get('durationSeconds') is not None:
+                body['durationSeconds'] = a['durationSeconds']
+            return self._rest('games', 'POST', body)
         game = 'games/' + a.get('gameId', '')
         token = a.get('agentToken')
         if name == 'register_agent':
             return self._rest(game+'/agents', 'POST', {'name': a['name']}, a.get('hostToken'))
         if name == 'start_game':
             return self._rest(game+'/start', 'POST', {}, a.get('hostToken'))
-        if name in ('get_order_book', 'get_position'):
+        if name in ('get_order_book', 'get_position', 'get_atlas_history', 'get_fills'):
             data = self._rest(game+'/book', token=token)
+            o = data['result']
             if name == 'get_position':
-                data['result'] = {k: data['result'][k] for k in ('position', 'openOrders')}
+                data['result'] = {k: o[k] for k in ('position', 'openOrders')}
+            elif name == 'get_atlas_history':
+                limit = int(a.get('limit') or 20)
+                ticks = (o.get('atlas') or {}).get('ticks') or []
+                data['result'] = {'total': len(ticks), 'ticks': ticks[-limit:]}
+            elif name == 'get_fills':
+                limit = int(a.get('limit') or 10)
+                data['result'] = {'fills': [{'time': f.get('time'), 'side': f.get('side'), 'price': f.get('price'), 'quantity': f.get('quantity'), 'taker': f.get('taker'), 'maker': f.get('maker')} for f in (o.get('recentFills') or [])[:limit]]}
             return data
         if name == 'get_results':
             return self._rest(game+'/results', token=a.get('token'))
@@ -139,14 +165,17 @@ class ArenaMCP:
 
 class BaseAgent:
     """Override decide(). Identity and transport stay outside your strategy."""
-    def __init__(self, mcp: ArenaMCP, game_id: str, agent_token: str, interval: float = 2.0):
+    def __init__(self, mcp: ArenaMCP, game_id: str, agent_token: str, interval: float = 0.0):
         self.mcp, self.game_id, self.agent_token = mcp, game_id, agent_token
-        self.interval = max(.5, interval)
+        # 0 = free-running: the next decision starts as soon as this one lands, with a 250 ms floor.
+        self.interval = max(0.0, interval)
         # This strategy chooses its own initial quote; the exchange provides none.
         self.opening_quote = random.SystemRandom().randrange(10001) / 100
         self.rules = mcp.call_tool('get_rules')
         self.errors: list[str] = []
         self.last_usage = {'prompt_tokens': 0, 'completion_tokens': 0}
+        # One or two sentences explaining the latest decision; reported with record_decision for the round log.
+        self.last_note = ''
 
     def call(self, name: str, **arguments) -> Any:
         return self.mcp.call_tool(name, {**arguments, 'gameId': self.game_id, 'agentToken': self.agent_token})
@@ -176,15 +205,19 @@ class BaseAgent:
                 if observed['status'] == 'lobby':
                     time.sleep(.25)
                     continue
-                self.turn_deadline = time.monotonic() + min(14, observed['remainingMs']/1000)
+                self.turn_deadline = time.monotonic() + min(65, observed['remainingMs']/1000)
                 budget = 4
-                for turn in range(2):
+                # Server-clock stamp of the snapshot this decision acts on. A follow-up turn acts on the
+                # previous turn's tool results, so its observation time is that turn's execution time.
+                observation_time = observed.get('serverTime')
+                for turn in range(3):
                     if time.monotonic() >= self.turn_deadline:
                         break
                     inference_started = time.monotonic()
                     actions = self.decide(observed) if turn == 0 else self.followup(observed)
+                    response_time = round(time.time()*1000)
                     latency = round((time.monotonic()-inference_started)*1000)
-                    results, ended = [], False
+                    results, ended, execution_time = [], False, None
                     for i, action in enumerate(actions):
                         item = dict(action)
                         name = item.pop('action')
@@ -196,6 +229,10 @@ class BaseAgent:
                         try:
                             response = self.call(name, **item)
                             results.append({'ok': True, 'result': response.get('result', response)})
+                            # state.now is the server time at which the arena applied this action.
+                            state_now = (response.get('state') or {}).get('now') if isinstance(response, dict) else None
+                            if isinstance(state_now, (int, float)):
+                                execution_time = max(execution_time or 0, state_now)
                         except MCPError as exc:
                             results.append({'ok': False, 'error': str(exc)})
                             self.errors.append(str(exc))
@@ -204,11 +241,20 @@ class BaseAgent:
                     if ended:
                         return
                     # Optional telemetry follows trading so a telemetry error cannot discard a chosen action.
+                    # observationTime and executionTime are server stamps, so staleness is clock-consistent;
+                    # responseTime is this machine's clock when the model replied.
                     self.call('record_decision', latencyMs=latency,
                               inputTokens=self.last_usage.get('prompt_tokens', 0),
-                              outputTokens=self.last_usage.get('completion_tokens', 0), requestId=str(uuid.uuid4()))
+                              outputTokens=self.last_usage.get('completion_tokens', 0),
+                              observationTime=observation_time, responseTime=response_time, executionTime=execution_time,
+                              round=turn, model=getattr(self, 'model', None),
+                              reasoningEffort=getattr(self, 'reasoning_effort', None) or None,
+                              actions=[summarize_action(a, r) for a, r in zip(actions, results)],
+                              note=(self.last_note or '')[:600] or None,
+                              reasoning=(getattr(self, 'last_reasoning', '') or '')[:100000] or None, requestId=str(uuid.uuid4()))
+                    observation_time = execution_time or observation_time
                     budget -= min(budget, len(actions))
-                    if not actions or budget == 0 or any(a['action'] not in ('get_rules', 'get_order_book', 'get_position') for a in actions):
+                    if not actions or budget == 0 or any(a['action'] not in READ_TOOLS for a in actions):
                         break
             except (MCPError, ValueError) as exc:
                 self.error_notice(str(exc))
@@ -219,7 +265,101 @@ class BaseAgent:
                 if len(self.errors) >= 5:
                     print(f'{type(self).__name__}: stopped after five errors.')
                     return
-            time.sleep(max(.05, self.interval - (time.monotonic() - started)))
+            time.sleep(max(.25, self.interval - (time.monotonic() - started)))
+
+READ_TOOLS = ('get_rules', 'get_order_book', 'get_position', 'get_atlas_history', 'get_fills')
+
+def label_party(ident, me, others=None):
+    """you / Atlas / a stable pseudonym (other-N) for another agent, assigned in order of first appearance."""
+    if ident == '$atlas':
+        return 'Atlas'
+    if ident == me:
+        return 'you'
+    if isinstance(others, dict) and isinstance(ident, str) and ident not in ('other',) and '-' in ident:
+        return others.setdefault(ident, f'other-{len(others) + 1}')
+    return ident if isinstance(ident, str) and ident.startswith('other') else 'other'
+
+def header_snapshot(o: dict, since_time: float) -> dict:
+    """The per-turn header: the minimum every decision needs; details are pulled through the read tools."""
+    ticks = [t for t in ((o.get('atlas') or {}).get('ticks') or []) if t.get('filledQuantity')]
+    return {'serverTime': o.get('serverTime'), 'remainingMs': o.get('remainingMs'), 'lastPrice': o.get('lastPrice'),
+            'bestBid': (o.get('book') or {}).get('bestBid'), 'bestAsk': (o.get('book') or {}).get('bestAsk'),
+            'position': (o.get('position') or {}).get('position', 0), 'pnl': (o.get('position') or {}).get('pnl', 0),
+            'openOrders': len(o.get('openOrders') or []),
+            'atlasFillsSinceLastTurn': sum(1 for t in ticks if (t.get('time') or 0) > since_time), 'atlasFillsTotal': len(ticks)}
+
+def read_summary(action: str, result) -> dict:
+    """One-line stand-in replayed on later turns instead of a read result."""
+    n = lambda v: len(v) if isinstance(v, list) else 0
+    r = result if isinstance(result, dict) else {}
+    if action == 'get_order_book':
+        text = f"Viewed the order book ({n((r.get('book') or {}).get('bids')) + n((r.get('book') or {}).get('asks'))} levels), your {n(r.get('openOrders'))} open orders, position, recent fills and {n((r.get('atlas') or {}).get('ticks'))} Atlas executions"
+    elif action == 'get_atlas_history':
+        text = f"Viewed {n(r.get('ticks'))} Atlas executions"
+    elif action == 'get_fills':
+        text = f"Viewed {n(r.get('fills'))} recent fills"
+    elif action == 'get_position':
+        text = f"Viewed your position and {n(r.get('openOrders'))} open orders"
+    else:
+        text = 'Viewed the rules'
+    return {'ephemeral': True, 'note': text + ' on that turn; call the tool again for current data.'}
+
+def lean_position(p: dict) -> dict:
+    return {k: p.get(k) for k in ('position', 'cash', 'pnl', 'realizedPnl', 'unrealizedPnl', 'averageEntry', 'fills', 'makerFills', 'takerFills', 'peakPosition', 'maxDrawdown')}
+
+def lean_orders(orders: list, server_time) -> list:
+    return [{'id': o.get('id'), 'side': o.get('side'), 'price': o.get('price'), 'quantity': o.get('quantity'),
+             'filled': (o.get('originalQuantity') or 0) - (o.get('quantity') or 0) if isinstance(o.get('originalQuantity'), (int, float)) else 0,
+             'ageMs': max(0, server_time - o['time']) if isinstance(server_time, (int, float)) and isinstance(o.get('time'), (int, float)) else None} for o in orders]
+
+def lean_snapshot(value, others=None):
+    """Model-facing view of an observation or a tool result: no static rules, the trading view of the account, compact
+    orders and fills, counterparties labelled you / Atlas / other-N. The full data stays in the arena."""
+    if isinstance(value, dict) and 'book' in value:
+        me = (value.get('position') or {}).get('id')
+        who = lambda ident: label_party(ident, me, others)
+        lean = {k: v for k, v in value.items() if k not in ('rules', 'position', 'openOrders', 'recentFills', 'atlas')}
+        pos = value.get('position')
+        if isinstance(pos, dict):
+            lean['position'] = lean_position(pos)
+        if isinstance(value.get('openOrders'), list):
+            lean['openOrders'] = lean_orders(value['openOrders'], value.get('serverTime'))
+        if isinstance(value.get('recentFills'), list):
+            lean['recentFills'] = [{'time': f.get('time'), 'side': f.get('side'), 'price': f.get('price'), 'quantity': f.get('quantity'),
+                                    'taker': who(f.get('taker')), 'maker': who(f.get('maker'))} for f in value['recentFills']]
+        atlas = value.get('atlas')
+        if isinstance(atlas, dict):
+            ticks = atlas.get('ticks')
+            lean['atlas'] = {**atlas, 'ticks': [{**t, 'executions': [{**x, 'maker': who(x.get('maker'))} for x in t.get('executions', [])]} if isinstance(t, dict) else t for t in ticks]} if isinstance(ticks, list) else atlas
+        return lean
+    if isinstance(value, dict) and isinstance(value.get('result'), dict):
+        result = value['result']
+        if 'filledQuantity' in result:
+            lean = {'orderId': result.get('orderId'), 'status': result.get('status'), 'filled': result.get('filledQuantity')}
+            if result.get('filledQuantity'):
+                lean['averageFillPrice'] = result.get('averageFillPrice')
+            if result.get('remainingQuantity'):
+                lean['resting'] = result['remainingQuantity']
+            return {**value, 'result': lean}
+        if isinstance(result.get('ticks'), list):
+            return {**value, 'result': {**result, 'ticks': [{**t, 'executions': [{**x, 'maker': label_party(x.get('maker'), None, others)} for x in t.get('executions', [])]} if isinstance(t, dict) else t for t in result['ticks']]}}
+        if isinstance(result.get('fills'), list):
+            return {**value, 'result': {**result, 'fills': [{**f, 'taker': label_party(f.get('taker'), None, others), 'maker': label_party(f.get('maker'), None, others)} for f in result['fills']]}}
+        if isinstance(result.get('position'), dict) and 'id' in result['position']:
+            return {**value, 'result': {'position': lean_position(result['position']), 'openOrders': lean_orders(result.get('openOrders') or [], None)}}
+        return {**value, 'result': lean_snapshot(result, others)}
+    return value
+
+def summarize_action(action: dict, outcome: dict) -> dict:
+    """Credential-free per-action summary for record_decision: what was asked and what the arena did."""
+    summary = {k: action[k] for k in ('action', 'side', 'type', 'quantity', 'price') if action.get(k) is not None}
+    summary['ok'] = bool(outcome.get('ok'))
+    result = outcome.get('result') if summary['ok'] else None
+    if isinstance(result, dict):
+        summary.update({k: result[k] for k in ('status', 'filledQuantity', 'orderId') if k in result})
+    elif outcome.get('error'):
+        summary['error'] = str(outcome['error'])[:200]
+    return summary
 
 def quote(side: str, price: float, quantity: int = 5) -> dict:
     return {'action': 'place_order', 'side': side, 'type': 'limit',
@@ -237,6 +377,7 @@ class MarketMakerAgent(BaseAgent):
     def decide(self, o: dict) -> list[dict]:
         reference = market_reference(o, self.opening_quote)
         skew = max(-.15, min(.15, o['position']['position'] * .002))
+        self.last_note = f'Reference {reference:.2f} from {"last trade" if o["lastPrice"] is not None else "the book or my opening guess"}; inventory {o["position"]["position"]:+d} so skew {-skew:+.2f}; requoting both sides 0.04 away.'
         return [{'action': 'cancel_all'}, quote('buy', reference-.04-skew),
                 quote('sell', reference+.04-skew)]
 
@@ -247,6 +388,7 @@ class MeanReversionAgent(BaseAgent):
         anchor = sum(f['price']*f['quantity'] for f in recent)/quantity if quantity else market_reference(o, self.opening_quote)
         bid, ask = o['book']['bestBid'], o['book']['bestAsk']
         actions = [{'action': 'cancel_all'}]
+        self.last_note = f'Anchor {anchor:.2f} from the last {len(recent)} fills; ask {ask} / bid {bid}; ' + ('lifting the cheap ask.' if ask is not None and ask < anchor else 'hitting the rich bid.' if bid is not None and bid > anchor else 'quoting 0.02 around the anchor.')
         if ask is not None and ask < anchor:
             return actions + [{'action': 'place_order', 'side': 'buy', 'type': 'market', 'quantity': 3}]
         if bid is not None and bid > anchor:
@@ -258,6 +400,7 @@ class MomentumAgent(BaseAgent):
         recent = o['recentFills']
         up = len(recent) < 2 or recent[0]['price'] >= recent[1]['price']
         side, best = ('buy', o['book']['bestAsk']) if up else ('sell', o['book']['bestBid'])
+        self.last_note = f'Last move {"up" if up else "down"} ({len(recent)} recent fills); ' + (f'taking the {side} side at {best}.' if best is not None else 'no quote to take, posting 0.05 around the reference.')
         if best is not None:
             return [{'action': 'place_order', 'side': side, 'type': 'market', 'quantity': 2}]
         reference = market_reference(o, self.opening_quote)
@@ -271,8 +414,10 @@ class ModelAgent(BaseAgent):
     The actual underlying model must support tool calling.
     """
     def __init__(self, *args, provider: str, model: str, api_key: str, base_url: str = '',
-                 temperature: float = .3, max_tokens: int = 512, prompt: str = '', **kwargs):
+                 temperature: float = .3, max_tokens: int = 512, prompt: str = '', reasoning_effort: str = '', **kwargs):
         super().__init__(*args, **kwargs)
+        # Sail accepts OpenAI-style reasoning_effort (none/low/medium/high); it is recorded with every decision.
+        self.reasoning_effort = reasoning_effort if provider == 'sail' else ''
         endpoints = {'fireworks': 'https://api.fireworks.ai/inference/v1',
                      'sail': 'https://api.sailresearch.com/v1', 'modal': base_url}
         if provider not in endpoints or not endpoints[provider]:
@@ -284,7 +429,13 @@ class ModelAgent(BaseAgent):
         self.history: list[dict] = []
         self.trajectory: list[dict] = []
         self.pending_calls: list[dict] = []
-        names = {'get_rules', 'get_order_book', 'get_position', 'place_order', 'cancel_order', 'cancel_all', 'wait'}
+        # Ephemeral reads: index in history -> one-line reminder replayed on later turns instead of the data.
+        self.replay_overrides: dict[int, dict] = {}
+        self.turn_start = 0
+        self.last_turn_time = 0
+        # Other agents' ids -> other-N, assigned on first appearance and stable for the round.
+        self.party_names: dict[str, str] = {}
+        names = {*READ_TOOLS, 'place_order', 'cancel_order', 'cancel_all', 'wait'}
         self.model_tools = []
         for tool in self.mcp.tools():
             if tool['name'] not in names:
@@ -318,7 +469,10 @@ class ModelAgent(BaseAgent):
 
     def feedback(self, actions: list[dict], results: list[dict]) -> None:
         for call, result in zip(self.pending_calls, results):
-            self.remember({'role': 'tool', 'tool_call_id': call['id'], 'content': json.dumps(result)})
+            self.remember({'role': 'tool', 'tool_call_id': call['id'], 'content': json.dumps(lean_snapshot(result, self.party_names))})
+            name = call['function']['name']
+            if name in READ_TOOLS and result.get('ok'):
+                self.replay_overrides[len(self.history) - 1] = {'role': 'tool', 'tool_call_id': call['id'], 'content': json.dumps(read_summary(name, result.get('result')))}
         self.pending_calls = []
 
     def decide(self, o: dict) -> list[dict]:
@@ -329,20 +483,26 @@ class ModelAgent(BaseAgent):
 
     def infer(self, o: dict, fresh: bool) -> list[dict]:
         if fresh:
-            self.remember({'role': 'user', 'content': json.dumps(o)})
+            # Only the compact header enters history; the model pulls details with the read tools.
+            self.turn_start = len(self.history)
+            self.remember({'role': 'user', 'content': json.dumps(header_snapshot(o, self.last_turn_time))})
+            self.last_turn_time = o.get('serverTime') or self.last_turn_time
         headers = {'Content-Type': 'application/json', 'User-Agent': 'MarketArenaAgent/3.0'}
         if self.api_key:
             headers['Authorization'] = 'Bearer ' + self.api_key
-        system = ('Compete in this 60-second trading arena. Maximize final total P&L: cash plus inventory valued at the closing bid/ask midpoint. '
-                  'If either side is missing, use the last executed price. Quotes can influence the reference. No opening price or fixed fundamental is supplied. '
-                  'Your entire conversation from this round is retained. Use earlier actions and their tool results to adapt. The latest snapshot includes your current orders and position. '
-                  'Use at most four trading tools per decision. All prices are dollars. Supply quotes when needed. Read the public Atlas execution mechanism, timing, and quantity cap. Rules: '
+        system = ('Compete in this timed trading arena; the rules give durationSeconds and every snapshot gives remainingMs. Maximize final total P&L: cash plus inventory valued at C, the hidden Atlas center revealed at the end. '
+                  'Quotes cannot move C. Infer it from where Atlas trades; no opening price is supplied. '
+                  'Your conversation from this round is retained; each turn you get only a short header (time left, last price, best bid/ask, position, P&L, open-order count, Atlas fills since your last turn) and pull details with get_order_book, get_atlas_history, get_fills or get_position. Read results are shown only within the current decision; later turns see a one-line reminder, so read again when you need current data. '
+                  'Begin every reply with one or two plain sentences saying what you see and why you act (they are logged), then call the tools in the same reply. Use at most four trading tools per decision. All prices are dollars. Supply quotes when needed. Read the public Atlas mechanism: random arrivals, limit price within C ± 5, quantity cap. Rules: '
                   + json.dumps(o.get('rules', self.rules)) + '\nStrategy: ' + self.prompt)
-        payload = {'model': self.model, 'messages': [{'role': 'system', 'content': system}, *self.history],
+        replayed = [self.replay_overrides.get(i, m) if i < self.turn_start else m for i, m in enumerate(self.history)]
+        payload = {'model': self.model, 'messages': [{'role': 'system', 'content': system}, *replayed],
                    'tools': self.model_tools, 'tool_choice': 'auto', 'temperature': self.temperature, 'stream': False}
         payload['max_completion_tokens' if self.provider == 'sail' else 'max_tokens'] = self.max_tokens
-        timeout = max(.1, min(12, o['remainingMs']/1000,
-                             getattr(self, 'turn_deadline', time.monotonic()+12)-time.monotonic()))
+        if self.reasoning_effort:
+            payload['reasoning_effort'] = self.reasoning_effort
+        timeout = max(.1, min(60, o['remainingMs']/1000,
+                             getattr(self, 'turn_deadline', time.monotonic()+60)-time.monotonic()))
         try:
             with urlopen(Request(self.url, json.dumps(payload).encode(), headers, method='POST'), timeout=timeout, context=TLS_CONTEXT) as r:
                 data = json.load(r)
@@ -389,6 +549,9 @@ class ModelAgent(BaseAgent):
                 actions.append({**args, 'action': function.get('name', '')})
             except (ValueError, TypeError):
                 actions.append({'action': 'invalid_tool_arguments'})
+        self.last_note = message.get('content') if isinstance(message.get('content'), str) else ''
+        hidden = next((message.get(k) for k in ('reasoning_content', 'reasoning', 'thinking') if isinstance(message.get(k), str) and message.get(k).strip()), '')
+        self.last_reasoning = hidden.strip()[:100000]
         assistant = {'role': 'assistant', 'content': message.get('content')}
         if normalized:
             assistant['tool_calls'] = normalized
