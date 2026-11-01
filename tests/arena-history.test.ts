@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {complete} from '../lib/arena/providers.ts';
-import {converse,headerSnapshot,leanSnapshot,leanToolResult,normalizeCompletion,READ_TOOLS,readSummary,redactMessage,replayView,type ChatMessage,type Completion,type TranscriptEntry} from '../lib/arena/conversation.ts';
+import {converse,headerSnapshot,leanSnapshot,leanToolResult,normalizeCompletion,partyLabels,READ_TOOLS,readSummary,redactMessage,replayView,type ChatMessage,type Completion,type TranscriptEntry} from '../lib/arena/conversation.ts';
 import {createGame,startGame,intent,observation} from '../lib/arena/engine.ts';
 const config={provider:'sail' as const,model:'fixture',apiKey:'TEST_PROVIDER_SECRET'};
 const tool=(id:string,name:string,args:object)=>({id,type:'function',function:{name,arguments:JSON.stringify(args)}});
@@ -25,19 +25,21 @@ test('model snapshots drop the rules and slim the account, orders, and fills whi
  const g=createGame('game_lean','host','',[{name:'A',provider:'external'},{name:'B',provider:'external'}],1000);startGame(g,2000);
  const o:any=observation(g,g.agents[0],2001);o.atlas.ticks=Array.from({length:45},(_,i)=>({time:2000+i,side:'buy',filledQuantity:1,averageFillPrice:50,executions:[]}));
  intent(g,g.agents[1],{action:'place_order',side:'sell',type:'limit',quantity:3,price:40},2001);intent(g,g.agents[0],{action:'place_order',side:'buy',type:'limit',quantity:5,price:40},2002);intent(g,g.agents[0],{action:'place_order',side:'buy',type:'limit',quantity:2,price:39},2003);
- const full:any=observation(g,g.agents[0],2004);full.atlas.ticks=o.atlas.ticks.map((t:any,i:number)=>({...t,executions:[{price:50,quantity:1,maker:i%2?g.agents[0].id:g.agents[1].id}]}));const lean:any=leanSnapshot(full);
- assert.deepEqual(lean.atlas.ticks.slice(0,2).map((t:any)=>t.executions[0].maker),['other','you'],'Atlas execution makers are labelled');assert.equal(full.atlas.ticks[0].executions[0].maker,g.agents[1].id,'original untouched');
+ const full:any=observation(g,g.agents[0],2004);full.atlas.ticks=o.atlas.ticks.map((t:any,i:number)=>({...t,executions:[{price:50,quantity:1,maker:i%2?g.agents[0].id:g.agents[1].id}]}));
+ const others=partyLabels(g.agents,g.agents[0].id);assert.deepEqual([...others.values()],['other-1']);assert.ok(!others.has('$atlas')&&!others.has(g.agents[0].id));
+ const lean:any=leanSnapshot(full,others);
+ assert.deepEqual(lean.atlas.ticks.slice(0,2).map((t:any)=>t.executions[0].maker),['other-1','you'],'Atlas execution makers are labelled with stable pseudonyms');assert.equal((leanSnapshot(full) as any).atlas.ticks[0].executions[0].maker,'other','without a label table the generic label is used');assert.equal(full.atlas.ticks[0].executions[0].maker,g.agents[1].id,'original untouched');
  assert.ok(!('rules' in lean));assert.equal(lean.atlas.ticks.length,45,'every Atlas execution is kept');assert.equal(lean.atlas.ticks[0].time,2000);assert.ok(!('recentTicks' in lean.atlas));assert.equal(lean.book.bestBid,full.book.bestBid);assert.equal(full.atlas.ticks.length,45,'the original observation is untouched');
- assert.deepEqual(Object.keys(lean.position).sort(),['averageEntry','cash','pnl','position','realizedPnl','unrealizedPnl']);assert.equal(lean.position.position,3);assert.ok(!('calls' in lean.position)&&!('promptTokens' in lean.position));
- assert.deepEqual(lean.openOrders,[{id:full.openOrders[0].id,side:'buy',price:40,quantity:2},{id:full.openOrders[1].id,side:'buy',price:39,quantity:2}]);assert.ok(!('agentId' in lean.openOrders[0]));
- assert.deepEqual(lean.recentFills.map((f:any)=>[f.side,f.price,f.quantity,f.taker,f.maker]),[['buy',40,3,'you','other']]);assert.ok(!('id' in lean.recentFills[0]));
+ assert.deepEqual(Object.keys(lean.position).sort(),['averageEntry','cash','fills','makerFills','maxDrawdown','peakPosition','pnl','position','realizedPnl','takerFills','unrealizedPnl']);assert.equal(lean.position.position,3);assert.equal(lean.position.takerFills,1);assert.ok(!('calls' in lean.position)&&!('promptTokens' in lean.position));
+ assert.deepEqual(lean.openOrders,[{id:full.openOrders[0].id,side:'buy',price:40,quantity:2,filled:3,ageMs:2},{id:full.openOrders[1].id,side:'buy',price:39,quantity:2,filled:0,ageMs:1}]);assert.ok(!('agentId' in lean.openOrders[0]));
+ assert.deepEqual(lean.recentFills.map((f:any)=>[f.side,f.price,f.quantity,f.taker,f.maker]),[['buy',40,3,'you','other-1']]);assert.ok(!('id' in lean.recentFills[0]));
  assert.ok(!JSON.stringify(lean).includes(g.agents[1].id),'no counterparty ids');assert.ok(JSON.stringify(lean).length<JSON.stringify(full).length-JSON.stringify(full.rules).length,'lean view is smaller than the full observation minus rules');
  assert.deepEqual(leanSnapshot({position:1}),{position:1});assert.equal(leanSnapshot(null),null);
  const order:any=leanToolResult({action:'place_order',ok:true,result:{orderId:'ord_9',filledQuantity:2,remainingQuantity:3,canceledQuantity:0,averageFillPrice:40,status:'partially_filled'}});
  assert.deepEqual(order.result,{orderId:'ord_9',status:'partially_filled',filled:2,averageFillPrice:40,resting:3});
  assert.deepEqual(leanToolResult({action:'place_order',ok:true,result:{orderId:'ord_1',filledQuantity:0,remainingQuantity:0,canceledQuantity:4,averageFillPrice:null,status:'unfilled'}}).result,{orderId:'ord_1',status:'unfilled',filled:0});
  assert.deepEqual(leanToolResult({action:'cancel_all',ok:true,result:{status:'canceled',canceled:2}}).result,{status:'canceled',canceled:2});assert.deepEqual(leanToolResult({action:'wait',ok:false,error:'late'}),{action:'wait',ok:false,error:'late'});
- assert.ok(!('rules' in leanToolResult({action:'get_order_book',ok:true,result:full}).result));
+ assert.ok(!('rules' in leanToolResult({action:'get_order_book',ok:true,result:full}).result));assert.equal((leanToolResult({action:'get_order_book',ok:true,result:full},others) as any).result.recentFills[0].maker,'other-1');
 });
 test('the per-turn header is minimal, read results are ephemeral on replay, and decisions allow three rounds',async()=>{
  const g=createGame('game_header','host','',[{name:'A',provider:'external'},{name:'B',provider:'external'}],1000);startGame(g,2000);

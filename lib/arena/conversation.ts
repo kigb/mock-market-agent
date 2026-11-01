@@ -1,23 +1,21 @@
 import {ArenaError,type Intent} from './engine.ts';
 // Model-facing view of a market snapshot: the static rules are in the system prompt, the account is reduced to its trading
 // view, orders and fills are compact, and every Atlas execution so far is kept. REST/MCP observations keep every field.
-export function leanSnapshot<T>(value:T):T{
+export function leanSnapshot<T>(value:T,others?:PartyLabels):T{
  if(!value||typeof value!=='object'||!('book' in value))return value;
- const o=value as any,me=o.position?.id,who=(id:unknown)=>id==='$atlas'?'Atlas':id===me?'you':'other';
+ const o=value as any,me=o.position?.id,who=(id:unknown)=>labelParty(id,me,others);
  const {rules:_rules,position,openOrders,recentFills,atlas,...rest}=o;
- const ticks=atlas&&Array.isArray(atlas.ticks)?atlas.ticks.map((t:any)=>Array.isArray(t.executions)?{...t,executions:t.executions.map((x:any)=>({...x,maker:who(x.maker)}))}:t):undefined;
- return {...rest,...(atlas?{atlas:ticks?{...atlas,ticks}:atlas}:{}),
-  // Only the trading view of the account; the full statistics stay in REST, the leaderboard, and the export.
-  ...(position?{position:{position:position.position,cash:position.cash,pnl:position.pnl,realizedPnl:position.realizedPnl,unrealizedPnl:position.unrealizedPnl,averageEntry:position.averageEntry}}:{}),
-  ...(Array.isArray(openOrders)?{openOrders:openOrders.map((x:any)=>({id:x.id,side:x.side,price:x.price,quantity:x.quantity}))}:{}),
+ return {...rest,...(atlas?{atlas:Array.isArray(atlas.ticks)?{...atlas,ticks:labelTicks(atlas.ticks,me,others)}:atlas}:{}),
+  ...(position?{position:leanPosition(position)}:{}),
+  ...(Array.isArray(openOrders)?{openOrders:leanOrders(openOrders,o.serverTime)}:{}),
   ...(Array.isArray(recentFills)?{recentFills:recentFills.map((f:any)=>({time:f.time,side:f.side,price:f.price,quantity:f.quantity,taker:who(f.taker),maker:who(f.maker)}))}:{})} as T;
 }
 // Model-facing tool result: an order outcome shrinks to what the next decision needs; read tools return lean snapshots.
-export function leanToolResult<T extends {ok:boolean;result?:any}>(entry:T):T{
+export function leanToolResult<T extends {ok:boolean;result?:any}>(entry:T,others?:PartyLabels):T{
  if(!entry.ok||!entry.result||typeof entry.result!=='object')return entry;
  const r=entry.result;
  if('filledQuantity' in r)return {...entry,result:{orderId:r.orderId,status:r.status,filled:r.filledQuantity,...(r.filledQuantity?{averageFillPrice:r.averageFillPrice}:{}),...(r.remainingQuantity?{resting:r.remainingQuantity}:{})}};
- if('book' in r)return {...entry,result:leanSnapshot(r)};
+ if('book' in r)return {...entry,result:leanSnapshot(r,others)};
  return entry;
 }
 export type ToolCall={id:string;type:'function';function:{name:string;arguments:string}};
@@ -28,8 +26,15 @@ export type Completion={message:ChatMessage;calls:{id:string;intent:Intent}[];re
 // replay: when set, this is what the model sees on later turns instead of the stored message (ephemeral read results).
 export type TranscriptEntry={id:number;time:number;decisionId:string;step:number;message:ChatMessage;replay?:ChatMessage|null};
 export const READ_TOOLS=new Set(['get_rules','get_order_book','get_position','get_atlas_history','get_fills']);
-export const labelParty=(id:unknown,me:unknown)=>id==='$atlas'?'Atlas':id===me?'you':'other';
-export const labelTicks=(ticks:any[],me:unknown)=>ticks.map(t=>Array.isArray(t.executions)?{...t,executions:t.executions.map((x:any)=>({...x,maker:labelParty(x.maker,me)}))}:t);
+export type PartyLabels=Map<string,string>;
+// Stable pseudonyms for the other agents this round (other-1, other-2, … in registration order): the model can tell
+// opponents apart and count them without ever seeing an agent id. Atlas and the agent itself keep their names.
+export function partyLabels(agents:{id:string}[],me:string):PartyLabels{const labels=new Map<string,string>();let n=0;for(const a of agents){if(a.id==='$atlas'||a.id===me)continue;labels.set(a.id,'other-'+(++n));}return labels;}
+export const labelParty=(id:unknown,me:unknown,others?:PartyLabels)=>id==='$atlas'?'Atlas':id===me?'you':(typeof id==='string'&&others?.get(id))||'other';
+export const labelTicks=(ticks:any[],me:unknown,others?:PartyLabels)=>ticks.map(t=>Array.isArray(t.executions)?{...t,executions:t.executions.map((x:any)=>({...x,maker:labelParty(x.maker,me,others)}))}:t);
+// The trading view of the account: what a market maker needs to manage inventory and notice adverse selection.
+export const leanPosition=(p:any)=>({position:p.position,cash:p.cash,pnl:p.pnl,realizedPnl:p.realizedPnl,unrealizedPnl:p.unrealizedPnl,averageEntry:p.averageEntry,fills:p.fills,makerFills:p.makerFills,takerFills:p.takerFills,peakPosition:p.peakPosition,maxDrawdown:p.maxDrawdown});
+export const leanOrders=(orders:any[],serverTime:number)=>orders.map(x=>({id:x.id,side:x.side,price:x.price,quantity:x.quantity,filled:typeof x.originalQuantity==='number'?x.originalQuantity-x.quantity:0,ageMs:typeof x.time==='number'&&typeof serverTime==='number'?Math.max(0,serverTime-x.time):null}));
 // The per-turn header: the minimum every decision needs. Everything else is pulled through the read tools.
 export function headerSnapshot(o:any,sinceTime:number){
  const ticks:any[]=Array.isArray(o?.atlas?.ticks)?o.atlas.ticks:[],filled=ticks.filter(t=>t.filledQuantity>0);

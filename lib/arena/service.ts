@@ -2,17 +2,18 @@ import {env} from 'cloudflare:workers';
 import {defaultAgent,DEFAULT_MAX_TOKENS,DEFAULT_STRATEGY,presetCallLimit} from './presets.ts';
 import {addAgent,addEvent,ArenaError,callLimit,createGame,DURATION,durationOf,ensureRunning,intent,MIN_DECISION_GAP_MS,observation,orderBook,publicState,RULES,rulesFor,startGame,type AgentSpec,type Game,type Intent} from './engine.ts';
 import {agentAuth,authenticate,change,insertGame,replayMessages,reserveDefaultCall} from './store.ts';
-import {converse,headerSnapshot,labelParty,labelTicks,leanSnapshot,leanToolResult,READ_TOOLS,readSummary,scriptedCompletion,type ChatMessage,type Completion} from './conversation.ts';
+import {converse,headerSnapshot,labelParty,labelTicks,leanOrders,leanPosition,leanSnapshot,leanToolResult,partyLabels,READ_TOOLS,readSummary,scriptedCompletion,type ChatMessage,type Completion} from './conversation.ts';
 import {baseline,endpoint,complete,effectiveReasoningEffort,type ModelConfig} from './providers.ts';
 export async function makeGame(specs:AgentSpec[]=[],seed=42,owner='',durationMs:number=DURATION){const now=Date.now(),g=createGame('game_'+crypto.randomUUID(),crypto.randomUUID()+crypto.randomUUID(),owner,specs,now,seed,undefined,durationMs);await insertGame(g);return {state:publicState(g,now),revision:0,hostToken:g.hostToken,agentTokens:g.agents.filter(a=>a.id!=='$atlas').map(a=>({id:a.id,name:a.name,token:a.token}))};}
 export function runAction(g:Game,agentToken:string,input:any,now:number){
  const a=agentAuth(g,agentToken);
  if(input.action==='get_rules')return rulesFor(g);
  if(input.action==='get_order_book')return observation(g,a,now);
- if(input.action==='get_position'){const o=observation(g,a,now);return {position:o.position,openOrders:o.openOrders};}
+ const others=partyLabels(g.agents,a.id);
+ if(input.action==='get_position'){const o=observation(g,a,now);return {position:leanPosition(o.position),openOrders:leanOrders(o.openOrders,o.serverTime)};}
  const limit=(fallback:number,max:number)=>Number.isInteger(input.limit)&&input.limit>=1?Math.min(input.limit,max):fallback;
- if(input.action==='get_atlas_history'){const o=observation(g,a,now);return {total:o.atlas.ticks.length,ticks:labelTicks(o.atlas.ticks.slice(-limit(20,300)),a.id)};}
- if(input.action==='get_fills'){return {fills:g.fills.slice(-limit(10,50)).reverse().map(f=>({time:f.time,side:f.side,price:f.price/100,quantity:f.quantity,taker:labelParty(f.taker,a.id),maker:labelParty(f.maker,a.id)}))};}
+ if(input.action==='get_atlas_history'){const o=observation(g,a,now);return {total:o.atlas.ticks.length,ticks:labelTicks(o.atlas.ticks.slice(-limit(20,300)),a.id,others)};}
+ if(input.action==='get_fills'){return {fills:g.fills.slice(-limit(10,50)).reverse().map(f=>({time:f.time,side:f.side,price:f.price/100,quantity:f.quantity,taker:labelParty(f.taker,a.id,others),maker:labelParty(f.maker,a.id,others)}))};}
  return intent(g,a,input as Intent,now,input.requestId);
 }
 export async function callTool(name:string,args:any,owner=''){
@@ -91,7 +92,8 @@ export async function decision(id:string,token:string,config:ModelConfig|undefin
   const applied=await change(id,(g,now,journal,tx)=>{
    const a=agentAuth(g,token),late=g.status!=='running'||a.leaseId!==leaseId,before=orderBook(g);
    const results=outcome.calls.map((call,i)=>{if(late)return {action:call.intent.action,ok:false,error:'Game deadline or decision lease passed; action was not executed.'};try{return {action:call.intent.action,ok:true,result:trimRules(runAction(g,token,{...call.intent,requestId:leaseId+':'+startStep+':'+i},now))};}catch(e){a.errors++;const error=e instanceof ArenaError?e.message:'Trading action failed.';addEvent(g,now,a.id,'error',error);return {action:call.intent.action,ok:false,error};}});
-   const replies:ChatMessage[]=results.map((result,i)=>({role:'tool',tool_call_id:outcome.calls[i].id,content:JSON.stringify(leanToolResult(result))}));
+   const others=partyLabels(g.agents,a.id);
+   const replies:ChatMessage[]=results.map((result,i)=>({role:'tool',tool_call_id:outcome.calls[i].id,content:JSON.stringify(leanToolResult(result,others))}));
    // Read results are ephemeral: later turns replay a one-line reminder instead of the data.
    const replays=results.map((result,i)=>READ_TOOLS.has(outcome.calls[i].intent.action)&&result.ok?{role:'tool' as const,tool_call_id:outcome.calls[i].id,content:JSON.stringify(readSummary(outcome.calls[i].intent.action,result.result))}:null);
    journal(a.id,leaseId,startStep,[outcome.message,...replies],[config?.apiKey??''],[null,...replays]);

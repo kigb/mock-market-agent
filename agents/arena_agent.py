@@ -143,16 +143,15 @@ class ArenaMCP:
         if name in ('get_order_book', 'get_position', 'get_atlas_history', 'get_fills'):
             data = self._rest(game+'/book', token=token)
             o = data['result']
-            me = (o.get('position') or {}).get('id')
             if name == 'get_position':
                 data['result'] = {k: o[k] for k in ('position', 'openOrders')}
             elif name == 'get_atlas_history':
                 limit = int(a.get('limit') or 20)
                 ticks = (o.get('atlas') or {}).get('ticks') or []
-                data['result'] = {'total': len(ticks), 'ticks': [{**t, 'executions': [{**x, 'maker': label_party(x.get('maker'), me)} for x in t.get('executions', [])]} for t in ticks[-limit:]]}
+                data['result'] = {'total': len(ticks), 'ticks': ticks[-limit:]}
             elif name == 'get_fills':
                 limit = int(a.get('limit') or 10)
-                data['result'] = {'fills': [{'time': f.get('time'), 'side': f.get('side'), 'price': f.get('price'), 'quantity': f.get('quantity'), 'taker': label_party(f.get('taker'), me), 'maker': label_party(f.get('maker'), me)} for f in (o.get('recentFills') or [])[:limit]]}
+                data['result'] = {'fills': [{'time': f.get('time'), 'side': f.get('side'), 'price': f.get('price'), 'quantity': f.get('quantity'), 'taker': f.get('taker'), 'maker': f.get('maker')} for f in (o.get('recentFills') or [])[:limit]]}
             return data
         if name == 'get_results':
             return self._rest(game+'/results', token=a.get('token'))
@@ -270,8 +269,15 @@ class BaseAgent:
 
 READ_TOOLS = ('get_rules', 'get_order_book', 'get_position', 'get_atlas_history', 'get_fills')
 
-def label_party(ident, me):
-    return 'Atlas' if ident == '$atlas' else 'you' if ident == me else 'other'
+def label_party(ident, me, others=None):
+    """you / Atlas / a stable pseudonym (other-N) for another agent, assigned in order of first appearance."""
+    if ident == '$atlas':
+        return 'Atlas'
+    if ident == me:
+        return 'you'
+    if isinstance(others, dict) and isinstance(ident, str) and ident not in ('other',) and '-' in ident:
+        return others.setdefault(ident, f'other-{len(others) + 1}')
+    return ident if isinstance(ident, str) and ident.startswith('other') else 'other'
 
 def header_snapshot(o: dict, since_time: float) -> dict:
     """The per-turn header: the minimum every decision needs; details are pulled through the read tools."""
@@ -298,25 +304,33 @@ def read_summary(action: str, result) -> dict:
         text = 'Viewed the rules'
     return {'ephemeral': True, 'note': text + ' on that turn; call the tool again for current data.'}
 
-def lean_snapshot(value):
-    """Model-facing view of an observation (or a tool result wrapping one): no static rules, the trading view of the
-    account only, compact orders and fills, every Atlas execution so far is kept. The full data stays in the arena."""
+def lean_position(p: dict) -> dict:
+    return {k: p.get(k) for k in ('position', 'cash', 'pnl', 'realizedPnl', 'unrealizedPnl', 'averageEntry', 'fills', 'makerFills', 'takerFills', 'peakPosition', 'maxDrawdown')}
+
+def lean_orders(orders: list, server_time) -> list:
+    return [{'id': o.get('id'), 'side': o.get('side'), 'price': o.get('price'), 'quantity': o.get('quantity'),
+             'filled': (o.get('originalQuantity') or 0) - (o.get('quantity') or 0) if isinstance(o.get('originalQuantity'), (int, float)) else 0,
+             'ageMs': max(0, server_time - o['time']) if isinstance(server_time, (int, float)) and isinstance(o.get('time'), (int, float)) else None} for o in orders]
+
+def lean_snapshot(value, others=None):
+    """Model-facing view of an observation or a tool result: no static rules, the trading view of the account, compact
+    orders and fills, counterparties labelled you / Atlas / other-N. The full data stays in the arena."""
     if isinstance(value, dict) and 'book' in value:
         me = (value.get('position') or {}).get('id')
-        who = lambda ident: 'Atlas' if ident == '$atlas' else 'you' if ident == me else 'other'
+        who = lambda ident: label_party(ident, me, others)
         lean = {k: v for k, v in value.items() if k not in ('rules', 'position', 'openOrders', 'recentFills', 'atlas')}
+        pos = value.get('position')
+        if isinstance(pos, dict):
+            lean['position'] = lean_position(pos)
+        if isinstance(value.get('openOrders'), list):
+            lean['openOrders'] = lean_orders(value['openOrders'], value.get('serverTime'))
+        if isinstance(value.get('recentFills'), list):
+            lean['recentFills'] = [{'time': f.get('time'), 'side': f.get('side'), 'price': f.get('price'), 'quantity': f.get('quantity'),
+                                    'taker': who(f.get('taker')), 'maker': who(f.get('maker'))} for f in value['recentFills']]
         atlas = value.get('atlas')
         if isinstance(atlas, dict):
             ticks = atlas.get('ticks')
             lean['atlas'] = {**atlas, 'ticks': [{**t, 'executions': [{**x, 'maker': who(x.get('maker'))} for x in t.get('executions', [])]} if isinstance(t, dict) else t for t in ticks]} if isinstance(ticks, list) else atlas
-        pos = value.get('position')
-        if isinstance(pos, dict):
-            lean['position'] = {k: pos.get(k) for k in ('position', 'cash', 'pnl', 'realizedPnl', 'unrealizedPnl', 'averageEntry')}
-        if isinstance(value.get('openOrders'), list):
-            lean['openOrders'] = [{k: o.get(k) for k in ('id', 'side', 'price', 'quantity')} for o in value['openOrders']]
-        if isinstance(value.get('recentFills'), list):
-            lean['recentFills'] = [{'time': f.get('time'), 'side': f.get('side'), 'price': f.get('price'), 'quantity': f.get('quantity'),
-                                    'taker': who(f.get('taker')), 'maker': who(f.get('maker'))} for f in value['recentFills']]
         return lean
     if isinstance(value, dict) and isinstance(value.get('result'), dict):
         result = value['result']
@@ -327,7 +341,13 @@ def lean_snapshot(value):
             if result.get('remainingQuantity'):
                 lean['resting'] = result['remainingQuantity']
             return {**value, 'result': lean}
-        return {**value, 'result': lean_snapshot(result)}
+        if isinstance(result.get('ticks'), list):
+            return {**value, 'result': {**result, 'ticks': [{**t, 'executions': [{**x, 'maker': label_party(x.get('maker'), None, others)} for x in t.get('executions', [])]} if isinstance(t, dict) else t for t in result['ticks']]}}
+        if isinstance(result.get('fills'), list):
+            return {**value, 'result': {**result, 'fills': [{**f, 'taker': label_party(f.get('taker'), None, others), 'maker': label_party(f.get('maker'), None, others)} for f in result['fills']]}}
+        if isinstance(result.get('position'), dict) and 'id' in result['position']:
+            return {**value, 'result': {'position': lean_position(result['position']), 'openOrders': lean_orders(result.get('openOrders') or [], None)}}
+        return {**value, 'result': lean_snapshot(result, others)}
     return value
 
 def summarize_action(action: dict, outcome: dict) -> dict:
@@ -413,6 +433,8 @@ class ModelAgent(BaseAgent):
         self.replay_overrides: dict[int, dict] = {}
         self.turn_start = 0
         self.last_turn_time = 0
+        # Other agents' ids -> other-N, assigned on first appearance and stable for the round.
+        self.party_names: dict[str, str] = {}
         names = {*READ_TOOLS, 'place_order', 'cancel_order', 'cancel_all', 'wait'}
         self.model_tools = []
         for tool in self.mcp.tools():
@@ -447,7 +469,7 @@ class ModelAgent(BaseAgent):
 
     def feedback(self, actions: list[dict], results: list[dict]) -> None:
         for call, result in zip(self.pending_calls, results):
-            self.remember({'role': 'tool', 'tool_call_id': call['id'], 'content': json.dumps(lean_snapshot(result))})
+            self.remember({'role': 'tool', 'tool_call_id': call['id'], 'content': json.dumps(lean_snapshot(result, self.party_names))})
             name = call['function']['name']
             if name in READ_TOOLS and result.get('ok'):
                 self.replay_overrides[len(self.history) - 1] = {'role': 'tool', 'tool_call_id': call['id'], 'content': json.dumps(read_summary(name, result.get('result')))}
