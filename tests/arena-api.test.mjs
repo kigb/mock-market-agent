@@ -2,11 +2,11 @@ import assert from 'node:assert/strict';
 const url=process.env.ARENA_TEST_URL||'http://127.0.0.1:5173';
 const api=async(path,method='GET',body,token)=>{const r=await fetch(url+'/api/arena/'+path,{method,headers:{...(body?{'Content-Type':'application/json'}:{}),...(token?{'X-Arena-Token':token}:{})},body:body?JSON.stringify(body):undefined});const d=await r.json();return {status:r.status,...d};};
 const rpc=async(method,params)=>{const r=await fetch(url+'/mcp',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});assert.equal(r.status,200);return r.json();};
-const rules=await api('rules');assert.equal(rules.ticker,'MOCK');assert.equal(rules.durationSeconds,180);assert.deepEqual(rules.durationRange,[30,600]);assert.equal(rules.openingPrice,null);assert.equal(rules.botMeanIntervalSeconds,2);assert.equal(rules.scoringMode,'hidden_center');assert.equal(rules.botExecutionMode,'limit_ioc');assert.deepEqual(rules.botCenterRange,[20,80]);assert.equal(rules.botLimitBand,5);assert.deepEqual(rules.botQuantityRange,[1,5]);
+const rules=await api('rules?botMode=hidden_center');assert.equal(rules.ticker,'MOCK');assert.equal(rules.durationSeconds,180);assert.deepEqual(rules.durationRange,[30,600]);assert.equal(rules.openingPrice,null);assert.equal(rules.botMeanIntervalSeconds,2);assert.equal(rules.scoringMode,'hidden_center');assert.equal(rules.botExecutionMode,'limit_ioc');assert.deepEqual(rules.botCenterRange,[20,80]);assert.equal(rules.botLimitBand,5);assert.deepEqual(rules.botQuantityRange,[1,5]);
 const discovery=await rpc('server/discover',{});assert.ok(discovery.result.supportedVersions.includes('2026-07-28'));
 const init=await rpc('initialize',{protocolVersion:'2025-06-18'});assert.equal(init.result.protocolVersion,'2025-06-18');
 const tools=await rpc('tools/list',{});assert.ok(tools.result.tools.find(t=>t.name==='place_order'));assert.ok(tools.result.tools.find(t=>t.name==='record_decision'));
-const created=await api('games','POST',{agents:[{name:'Alice API',provider:'external'},{name:'Bob API',provider:'external'},{name:'Charlie API',provider:'external'},{name:'Dara API',provider:'external'}]});assert.equal(created.status,201);assert.equal(created.state.lastPrice,null);assert.deepEqual(created.state.series,[]);assert.equal(created.state.settlementPrice,null);assert.equal(created.state.valuation.price,null);assert.equal(created.state.valuation.source,'unpriced');assert.equal(created.state.atlas.maxAttempts,null);assert.equal(created.state.atlas.center,null);assert.equal(created.state.atlas.executionMode,'limit_ioc');assert.deepEqual(created.state.atlas.ticks,[]);
+const created=await api('games','POST',{botMode:'hidden_center',agents:[{name:'Alice API',provider:'external'},{name:'Bob API',provider:'external'},{name:'Charlie API',provider:'external'},{name:'Dara API',provider:'external'}]});assert.equal(created.status,201);assert.equal(created.state.lastPrice,null);assert.deepEqual(created.state.series,[]);assert.equal(created.state.settlementPrice,null);assert.equal(created.state.valuation.price,null);assert.equal(created.state.valuation.source,'unpriced');assert.equal(created.state.atlas.maxAttempts,null);assert.equal(created.state.atlas.center,null);assert.equal(created.state.atlas.executionMode,'limit_ioc');assert.deepEqual(created.state.atlas.ticks,[]);
 const {id}=created.state,host=created.hostToken,[a,b,c,d]=created.agentTokens;
 assert.equal((await api('games/'+id)).status,401);const firstRead=await api('games/'+id,'GET',undefined,host),secondRead=await api('games/'+id,'GET',undefined,host);assert.equal(firstRead.revision,secondRead.revision);assert.equal(firstRead.revision,0);
 assert.equal((await api('games/'+id+'/start','POST',{},a.token)).status,401);
@@ -29,15 +29,15 @@ console.log('PASS: REST + MCP discovery, registration, ownership, token privacy,
 
 const defaults=await api('defaults');assert.equal(defaults.agents.length,6);assert.equal(new Set(defaults.agents.map(a=>a.model)).size,4);assert.equal(typeof defaults.available,'boolean');assert.ok(!JSON.stringify(defaults).includes('apiKey'));
 const presets=defaults.agents;
-assert.equal((await api('games','POST',{agents:[{...presets[0],model:'other'}]})).status,400);
-assert.equal((await api('games','POST',{agents:[{...presets[0]},{...presets[0],name:'Copy'}]})).status,400);
-const presetGame=await api('games','POST',{agents:presets});assert.equal(presetGame.status,201);assert.equal(presetGame.state.agents.length,6);
+assert.equal((await api('games','POST',{botMode:'hidden_center',agents:[{...presets[0],model:'other'}]})).status,400);
+assert.equal((await api('games','POST',{botMode:'hidden_center',agents:[{...presets[0]},{...presets[0],name:'Copy'}]})).status,400);
+const presetGame=await api('games','POST',{botMode:'hidden_center',agents:presets});assert.equal(presetGame.status,201);assert.equal(presetGame.state.agents.length,6);
 await api('games/'+presetGame.state.id+'/start','POST',{},presetGame.hostToken);
 const wrongConfig=await api('games/'+presetGame.state.id+'/decide','POST',{config:{provider:'sail',model:presets[0].model,apiKey:'TEST_ONLY',prompt:'override'}},presetGame.agentTokens[0].token);assert.equal(wrongConfig.status,400);assert.match(wrongConfig.error,/fixed server configuration/);
-const custom=await api('games','POST',{agents:[{name:'Own key',provider:'sail',model:presets[0].model}]});await api('games/'+custom.state.id+'/start','POST',{},custom.hostToken);assert.equal((await api('games/'+custom.state.id+'/decide','POST',{},custom.agentTokens[0].token)).status,400);
+const custom=await api('games','POST',{botMode:'hidden_center',agents:[{name:'Own key',provider:'sail',model:presets[0].model}]});await api('games/'+custom.state.id+'/start','POST',{},custom.hostToken);assert.equal((await api('games/'+custom.state.id+'/decide','POST',{},custom.agentTokens[0].token)).status,400);
 console.log('PASS: six fixed default slots, no duplicate slots, no client override, and custom agents never inherit the shared key.');
 
-const memoryGame=await api('games','POST',{agents:Array.from({length:4},(_,i)=>({name:'Memory '+i,provider:'baseline',strategy:'maker',intervalMs:500}))});
+const memoryGame=await api('games','POST',{botMode:'hidden_center',agents:Array.from({length:4},(_,i)=>({name:'Memory '+i,provider:'baseline',strategy:'maker',intervalMs:500}))});
 assert.equal(memoryGame.status,201);const memoryId=memoryGame.state.id;
 await api('games/'+memoryId+'/start','POST',{},memoryGame.hostToken);
 const memoryTurns=await Promise.all(memoryGame.agentTokens.map(a=>api('games/'+memoryId+'/decide','POST',{},a.token)));
@@ -73,8 +73,8 @@ const sweep=await api('finalize','POST',{});assert.equal(sweep.status,200);asser
 console.log('PASS: commitment published before the close, server and self-reported decision rows carry three timestamps and outcomes, metrics ownership holds, exports include decisions, and the finalize sweep responds.');
 
 // Per-game round length through REST and MCP, with bounds.
-const shortGame=await api('games','POST',{durationSeconds:30,agents:[{name:'Short',provider:'external'}]});assert.equal(shortGame.status,201);assert.equal(shortGame.state.durationMs,30000);assert.equal(shortGame.state.remainingMs,30000);
-assert.equal((await api('games','POST',{durationSeconds:10})).status,400);assert.equal((await api('games','POST',{durationSeconds:'long'})).status,400);
+const shortGame=await api('games','POST',{botMode:'hidden_center',durationSeconds:30,agents:[{name:'Short',provider:'external'}]});assert.equal(shortGame.status,201);assert.equal(shortGame.state.durationMs,30000);assert.equal(shortGame.state.remainingMs,30000);
+assert.equal((await api('games','POST',{botMode:'hidden_center',durationSeconds:10})).status,400);assert.equal((await api('games','POST',{botMode:'hidden_center',durationSeconds:'long'})).status,400);
 const mcpGame=await rpc('tools/call',{name:'create_game',arguments:{seed:1,durationSeconds:120}});assert.equal(mcpGame.result.isError,false);assert.equal(mcpGame.result.structuredContent.state.durationMs,120000);
 console.log('PASS: rounds default to 180 s, durationSeconds is honoured by REST and MCP, and out-of-range lengths are rejected.');
 

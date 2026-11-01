@@ -48,6 +48,19 @@ def replay(seed: int, secret_hex: str, started_at: int, ends_at: int):
                      'limit': center + js_round((draw() * 2 - 1) * LIMIT_BAND_CENTS)})
     return center, plan
 
+def replay_relative(seed, secret_hex, started_at, ends_at):
+    def channel(name):
+        secret = hashlib.sha256(bytes.fromhex(secret_hex) + ('market_relative:'+name).encode()).digest()
+        return uniform_stream(secret, seed).__next__
+    gap, side, size, distance = [channel(name) for name in ('arrivals', 'sides', 'sizes', 'tolerances')]
+    plan, t = [], started_at
+    while len(plan) < math.ceil((ends_at-started_at)/1000)*3+50:
+        t += max(1, js_round(-math.log(1-gap())*1000))
+        if t >= ends_at:
+            break
+        plan.append({'time': t, 'side': 'buy' if side() < .5 else 'sell', 'quantity': 1+math.floor(size()*5), 'distance': 1+math.floor(distance()*50)})
+    return plan
+
 def verify(report: dict) -> bool:
     state = report.get('results', report)
     atlas = state['atlas']
@@ -62,6 +75,37 @@ def verify(report: dict) -> bool:
         ok = False
     else:
         print(f'Commitment OK: SHA-256(secret) = {commitment}')
+    if state.get('botMode') == 'market_relative':
+        plan = replay_relative(state['seed'], secret, state['startedAt'], state['endsAt'])
+        ticks = atlas.get('ticks', [])
+        if len(plan) != len(ticks):
+            print('ARRIVAL COUNT MISMATCH')
+            return False
+        for p, tick in zip(plan, ticks):
+            if (p['time'], p['side'], p['quantity'], p['distance']) != (tick['time'], tick['side'], tick['requestedQuantity'], js_round(tick['distance']*100)):
+                print('ARRIVAL MISMATCH')
+                return False
+            bid, ask = tick.get('bestBid'), tick.get('bestAsk')
+            skip = 'one_sided' if bid is None or ask is None else 'wide_spread' if js_round(ask*100)-js_round(bid*100)>100 else None
+            if skip:
+                if tick.get('skipReason') != skip or tick['filledQuantity'] != 0:
+                    print('SKIP MISMATCH')
+                    return False
+            else:
+                mid = (js_round(bid*100)+js_round(ask*100))/2
+                limit = math.floor(min(10000,mid+p['distance'])) if p['side']=='buy' else math.ceil(max(0,mid-p['distance']))
+                if abs(tick['limitPrice']*100-limit)>1e-7:
+                    print('PROTECTION MISMATCH')
+                    return False
+            if sum(e['quantity'] for e in tick.get('executions',[])) != tick['filledQuantity'] or tick['filledQuantity']+tick['canceledQuantity'] != p['quantity']:
+                print('QUANTITY MISMATCH')
+                return False
+            for e in tick.get('executions',[]):
+                if (p['side']=='buy' and e['price']>tick['limitPrice']+1e-9) or (p['side']=='sell' and e['price']<tick['limitPrice']-1e-9):
+                    print('EXECUTION OUTSIDE LIMIT')
+                    return False
+        print(f'Relative plan OK: {len(plan)} arrivals, sizes, distances and recorded book-based limits match; no hidden center. Full price/FIFO verification also needs the ordered action log.')
+        return ok
     center, plan = replay(state['seed'], secret, state['startedAt'], state['endsAt'])
     if abs(center / 100 - atlas['center']) > 1e-9:
         print(f'CENTER MISMATCH: replayed {center/100:.2f}, revealed {atlas["center"]}')

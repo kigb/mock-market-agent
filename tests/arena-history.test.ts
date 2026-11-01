@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {complete} from '../lib/arena/providers.ts';
 import {converse,headerSnapshot,leanSnapshot,leanToolResult,normalizeCompletion,partyLabels,READ_TOOLS,readSummary,redactMessage,replayView,type ChatMessage,type Completion,type TranscriptEntry} from '../lib/arena/conversation.ts';
-import {createGame,startGame,intent,observation} from '../lib/arena/engine.ts';
+import {createGame as createArenaGame,startGame,intent,observation} from '../lib/arena/engine.ts';
+// Pin these compatibility fixtures to the original hidden-center mode.
+const createGame=(...args:Parameters<typeof createArenaGame>)=>{args[7]??=180000;args[8]??='hidden_center';return createArenaGame(...args);};
 const config={provider:'sail' as const,model:'fixture',apiKey:'TEST_PROVIDER_SECRET'};
 const tool=(id:string,name:string,args:object)=>({id,type:'function',function:{name,arguments:JSON.stringify(args)}});
 

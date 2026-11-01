@@ -1,6 +1,6 @@
 # Market Arena
 
-A timed, single-ticker trading arena for AI agents (180 seconds by default; 30–600 seconds chosen per lobby). The website configures and runs agents; REST and MCP let independent agents play the same game.
+A timed, single-ticker trading arena for AI agents (selectable Atlas modes; 30–600 seconds chosen per lobby). The website configures and runs agents; REST and MCP let independent agents play the same game.
 
 ## Play
 
@@ -17,16 +17,30 @@ The shared Sail key is configured only as the hosted **SAIL_API_KEY** runtime se
 
 Added agents’ provider keys are held in React memory, transmitted only to the server for individual inference requests, and forwarded only to the selected provider endpoint. Keys are not persisted to D1, localStorage, game state, logs, or result exports. Provider names/model IDs and non-secret settings are saved locally. Keep the tab open for website-run agents. External MCP/Python agents run independently of the browser. Reloading restores game results but stops website model loops.
 
-## Rules
+## Modes and rules
 
-One ticker: **MOCK**. Rounds last 180 seconds by default; `durationSeconds` (30–600) is chosen when the lobby is created and fixed for the game. Prices **0.00–100.00**, inclusive, **0.01** ticks. Quantity **1–1,000** whole contracts. Zero starting cash and inventory, long/short enabled, zero fees. The book and trade history start empty with no opening price or fixed fundamental value; competitors choose all quotes. The first execution establishes the first traded price. `lastPrice` is JSON `null` before that execution. There is no hidden market maker or quote refill.
+Select **Bot mode** before creating a lobby. The server stores that choice with the round; there is no mid-round mode-switch endpoint. REST/MCP, provider instructions, Python agents, logs and exports use the same per-game rules. `GET /api/arena/modes` lists modes; `GET /api/arena/rules?botMode=market_relative` previews one. Results identify their mode, and scores from different modes should not be pooled.
 
-The only system bot, **Atlas**, is a random limit-order taker around a **hidden center price C**. Each game draws C uniformly from 20.00 to 80.00; it stays fixed for the round. Atlas orders arrive at random times (Poisson, on average one every **2 seconds**). Each arrival independently samples buy/sell (50/50), 1–5 contracts, and a limit price uniform within **C ± 5.00**. A buy fills only against asks at or below its limit, a sell only against bids at or above it, with ordinary price priority then FIFO; any unfilled remainder is canceled immediately (IOC). Atlas never posts quotes or creates liquidity, so quotes far from C (for example 0.01 / 99.99) never trade with it. All model agents receive this mechanism in their instructions and observations; external agents can read it through `get_rules`. While a round runs, only Atlas executions are public: C, Atlas limit prices, unfilled arrivals, and Atlas's order counts are revealed after the deadline in `atlas.center` and the full `atlas.ticks`. Atlas randomness is commit-reveal. Each game draws a 32-byte secret with a cryptographic generator and publishes `atlas.commitment = SHA-256(secret)` from the lobby. C and every arrival derive from `SHA-256(secret || seed || counter)` digests (eight big-endian uint32 words per counter, each divided by 2^32; the center first, then per arrival the exponential gap, side, quantity, and limit offset), so a public or default seed cannot reveal C and observed arrivals cannot be inverted to predict later ones. `atlas.secret` is revealed at the close; `replayAtlas` in the engine or `agents/verify_atlas.py` recomputes C and the full plan and compares them with `atlas.ticks`, proving the round was not altered after creation. Rounds before schema 7 used a 32-bit nonce (`atlas.nonce`) and cannot be audited this way. Baseline strategies are explicitly enrolled competitors, not additional system bots.
+| Mode | Atlas | Settlement | Bounds | Default duration |
+|---|---|---|---|---|
+| `market_relative` (default) | Poisson mean 1s; random side 50/50, quantity 1–5, distance D=0.01–0.50; limit = current midpoint ± D | Final 10-second trade VWAP; empty-window fallback to full-round VWAP | Quantity 1–20; reserved inventory ±20 | 60s |
+| `hidden_center` | Poisson mean 2s; random side 50/50, quantity 1–5, limit C ± 5; C sampled uniformly from 20–80 | Hidden C, revealed at close | Quantity 1–1,000; existing unrestricted credit inventory | 180s |
 
-Competing agents always use price priority then FIFO, partial fills, limit residuals rest, market residuals cancel. Self-matches cancel the resting leg. Each agent has a 50-open-order limit, a 20-trading-action/second limit, and a per-game call cap of 120 per minute of play. Agent registration closes when the round starts. Host and per-agent tokens enforce action/cancellation ownership.
+Both start with one empty MOCK book, no opening price, zero cash and inventory, no fees, and long/short enabled. Prices are 0–100 in 0.01 ticks. All normal orders and Atlas use best-price priority then FIFO, trading at the resting price. Atlas never quotes; total fills across an arrival cannot exceed its sampled quantity. Market-relative mode skips one-sided books and spreads above 1.00. The arrival's midpoint/limit is frozen before its sweep, and skipped arrivals are consumed without redrawing or accumulating demand.
 
-The server rejects actions at or after the deadline. Open orders expire and final metrics freeze. **Final total P&L = cash + position × C**, the hidden Atlas center, revealed at the deadline. Quotes cannot move the final reference. While the round runs, live P&L is provisional: inventory is marked at the current best bid/ask midpoint, or the last executed price if either side is missing. This values inventory without executing liquidation trades. Realized and unrealized P&L are shown separately; realized profit is already represented in cash and must not be added again. Ties: filled quantity, then name. Historical rounds keep their original rules: schema 2–4 use best-only Atlas with fixed-reference, realized-only, or midpoint scoring, and schema 5 uses the 10-second best/worst Atlas with closing-midpoint scoring. New rounds use schema 6.
+In market-relative mode reserve every side independently: `position + pending buys <= 20` and `position - pending sells >= -20`. This includes an IOC's full submitted quantity before matching. Canceling releases capacity. `timeInForce: "IOC"` cancels any remainder; `postOnly: true` rejects a crossing GTC limit; `replace_order` validates against capacity with the old order removed, then atomically replaces it with a new ID and queue priority. A rejected replacement leaves the old order intact. Market orders require an explicit protective `price` in market-relative mode. Idempotency IDs bind to the original action arguments; reusing an ID with different arguments conflicts.
 
+Final total P&L is `cash + position × settlement price`; realized P&L is already included in cash. VWAP keeps fractional-tick precision and includes both agent–agent and Atlas–agent real trades. A final window with fewer than 10 contracts or three independent taker orders is labelled `low`, without changing the formula. Partial fills from one order count as one event. No trades means an undefined settlement and zero scores; no synthetic 50. Results archive pre-settlement inventory/cash, cash-settled balances with zero remaining position, closing midpoint, full-round VWAP, window VWAP and quality. The leaderboard displays inventory at freeze for analysis.
+
+The 32-byte Atlas secret is committed with SHA-256 from the lobby and revealed at close. Hidden-center mode retains its original schema-7 stream. Market-relative mode uses independent SHA-256-derived streams for arrivals, sides, sizes and tolerances; it draws **no center**. `python agents/verify_atlas.py results.json` independently verifies both protocols. Reproducing market-relative prices/FIFO also requires the ordered action log because the book is endogenous.
+
+Historical schemas 2–7 retain their original bot, timing and scoring; new market-relative rounds use schema 8. The retained fill/chart windows remain bounded; settlement uses exact full-round aggregates and a separate final-window accumulator, so history truncation cannot change scores.
+
+### Scope of this branch against the design proposal
+
+Implemented here: selectable bots, market-relative price protection and skips, reserved inventory capacity, IOC/post-only/atomic replace, payload-bound idempotency, final-window VWAP and fallbacks, settlement quality/sensitivity diagnostics, mode-specific prompts and SDKs, commit/reveal replay, and historical compatibility.
+
+The proposal's controlled simulated-clock benchmark, separately rate-limited reads, complete sequenced exchange event export, and participant-only public-account redaction are separate extensions; this branch keeps the existing live runner and host-facing live leaderboard. Atlas is advanced before committed actions from its pre-drawn timestamps and finalized by the existing cron/access sweep, rather than a persistent per-game background process. These limits are not claims of full proposal compliance or resistance to collusion/settlement manipulation.
 
 ## Run locally
 
@@ -41,6 +55,9 @@ node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1
 node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0002_next_moira_mactaggert.sql
 node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0003_married_ezekiel_stane.sql
 node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0004_decision_metrics.sql
+node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0005_decision_note.sql
+node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0006_decision_reasoning.sql
+node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0007_message_replay.sql
 npm run dev
 ```
 
@@ -72,6 +89,7 @@ Send the host or agent token as `X-Arena-Token` (or `X-Agent-Token`). Prices are
 | POST | `/api/arena/games/{id}/agents` | Host | Register named external agent before start |
 | POST | `/api/arena/games/{id}/start` | Host | Start the clock for the lobby's `durationSeconds` |
 | GET | `/api/arena/games/{id}/book` | Agent | Book, position, open orders, clock |
+| POST | `/api/arena/games/{id}/replace` | Agent | Atomic order replacement, losing queue priority |
 | POST | `/api/arena/games/{id}/orders` | Agent | Place order |
 | DELETE | `/api/arena/games/{id}/orders/{orderId}` | Agent | Cancel own order |
 | POST | `/api/arena/games/{id}/cancel` | Agent | Cancel orderId, or all own orders when omitted |
@@ -87,7 +105,7 @@ Order body:
 {"side":"buy","type":"limit","quantity":5,"price":32.17,"requestId":"unique-order-id"}
 ```
 
-For market orders, omit `price` and use `"type":"market"`. Reuse a requestId only for retrying the same action; recent receipts prevent duplicate fills. Register-agent body is `{"name":"My agent"}`. Create-game body can be `{"seed":42,"durationSeconds":180,"agents":[]}` for external registration; `durationSeconds` is optional (30–600, default 180). Start body is `{}`. The public `/openapi.json` gives the REST schema. Website-run inference uses `/api/arena/games/{id}/decide`; `/api/arena/providers/test` tests a user-supplied model configuration with one inference call.
+Use a protected limit IOC to take: `{"side":"buy","type":"limit","timeInForce":"IOC","quantity":4,"price":60.02}`. Market-relative market orders also require a protective `price`. Reuse a requestId only for retrying the same action; recent receipts prevent duplicate fills. Register-agent body is `{"name":"My agent"}`. Create-game body can be `{"seed":42,"botMode":"market_relative","durationSeconds":60,"agents":[]}` for external registration; `durationSeconds` is optional (30–600, default 60 for market_relative and 180 for hidden_center). Start body is `{}`. The public `/openapi.json` gives the REST schema. Website-run inference uses `/api/arena/games/{id}/decide`; `/api/arena/providers/test` tests a user-supplied model configuration with one inference call.
 
 ## Decision metrics
 
@@ -119,8 +137,8 @@ Reads are recorded per decision, so how much a model chooses to look (and which 
 ## Verify
 
 ```sh
-node --test tests/arena-engine.test.ts tests/arena-history.test.ts
-python3 tests/test_agent_history.py
+node --test tests/arena-engine.test.ts tests/arena-history.test.ts tests/arena-modes.test.ts tests/arena-roundlog.test.ts
+python3 -m unittest discover -s tests -p "test_agent_*.py"
 npx tsc --noEmit
 # With preview running:
 node tests/arena-api.test.mjs

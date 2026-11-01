@@ -1,24 +1,25 @@
+import {DEFAULT_BOT_MODE,type BotMode} from './modes.ts';
 import {env} from 'cloudflare:workers';
 import {defaultAgent,DEFAULT_MAX_TOKENS,DEFAULT_STRATEGY,presetCallLimit} from './presets.ts';
-import {addAgent,addEvent,ArenaError,callLimit,createGame,DURATION,durationOf,ensureRunning,intent,MIN_DECISION_GAP_MS,observation,orderBook,publicState,RULES,rulesFor,startGame,type AgentSpec,type Game,type Intent} from './engine.ts';
+import {addAgent,addEvent,ArenaError,callLimit,createGame,DURATION,durationOf,ensureRunning,intent,MIN_DECISION_GAP_MS,observation,orderBook,publicState,RULES,modeRules,rulesFor,startGame,type AgentSpec,type Game,type Intent} from './engine.ts';
 import {agentAuth,authenticate,change,insertGame,replayMessages,reserveDefaultCall} from './store.ts';
 import {converse,headerSnapshot,labelParty,labelTicks,leanOrders,leanPosition,leanSnapshot,leanToolResult,partyLabels,READ_TOOLS,readSummary,scriptedCompletion,type ChatMessage,type Completion} from './conversation.ts';
 import {baseline,endpoint,complete,effectiveReasoningEffort,type ModelConfig} from './providers.ts';
-export async function makeGame(specs:AgentSpec[]=[],seed=42,owner='',durationMs:number=DURATION){const now=Date.now(),g=createGame('game_'+crypto.randomUUID(),crypto.randomUUID()+crypto.randomUUID(),owner,specs,now,seed,undefined,durationMs);await insertGame(g);return {state:publicState(g,now),revision:0,hostToken:g.hostToken,agentTokens:g.agents.filter(a=>a.id!=='$atlas').map(a=>({id:a.id,name:a.name,token:a.token}))};}
+export async function makeGame(specs:AgentSpec[]=[],seed=42,owner='',durationMs:number|undefined=undefined,botMode:BotMode=DEFAULT_BOT_MODE){const now=Date.now(),g=createGame('game_'+crypto.randomUUID(),crypto.randomUUID()+crypto.randomUUID(),owner,specs,now,seed,undefined,durationMs,botMode);await insertGame(g);return {state:publicState(g,now),revision:0,hostToken:g.hostToken,agentTokens:g.agents.filter(a=>a.id!=='$atlas').map(a=>({id:a.id,name:a.name,token:a.token}))};}
 export function runAction(g:Game,agentToken:string,input:any,now:number){
  const a=agentAuth(g,agentToken);
  if(input.action==='get_rules')return rulesFor(g);
  if(input.action==='get_order_book')return observation(g,a,now);
  const others=partyLabels(g.agents,a.id);
- if(input.action==='get_position'){const o=observation(g,a,now);return {position:leanPosition(o.position),openOrders:leanOrders(o.openOrders,o.serverTime)};}
+ if(input.action==='get_position'){const o=observation(g,a,now);return {riskCapacity:o.riskCapacity,position:leanPosition(o.position),openOrders:leanOrders(o.openOrders,o.serverTime)};}
  const limit=(fallback:number,max:number)=>Number.isInteger(input.limit)&&input.limit>=1?Math.min(input.limit,max):fallback;
  if(input.action==='get_atlas_history'){const o=observation(g,a,now);return {total:o.atlas.ticks.length,ticks:labelTicks(o.atlas.ticks.slice(-limit(20,300)),a.id,others)};}
  if(input.action==='get_fills'){return {fills:g.fills.slice(-limit(10,50)).reverse().map(f=>({time:f.time,side:f.side,price:f.price/100,quantity:f.quantity,taker:labelParty(f.taker,a.id,others),maker:labelParty(f.maker,a.id,others)}))};}
  return intent(g,a,input as Intent,now,input.requestId);
 }
 export async function callTool(name:string,args:any,owner=''){
- if(name==='get_rules')return RULES;
- if(name==='create_game')return makeGame([],args.seed??42,owner,args.durationSeconds===undefined?DURATION:Number(args.durationSeconds)*1000);
+ if(name==='get_rules'){if(args.gameId){const r=await change(args.gameId,g=>{authenticate(g,args.agentToken??args.token);return rulesFor(g);});return r.result;}return modeRules(args.botMode);}
+ if(name==='create_game')return makeGame([],args.seed??42,owner,args.durationSeconds===undefined?undefined:Number(args.durationSeconds)*1000,args.botMode??DEFAULT_BOT_MODE);
  if(name==='register_agent')return change(args.gameId,(g,now)=>{authenticate(g,args.hostToken,true);const a=addAgent(g,{name:args.name,provider:'external',model:args.model},crypto.randomUUID(),crypto.randomUUID(),now);return {agentId:a.id,agentToken:a.token,name:a.name};});
  if(name==='start_game')return change(args.gameId,(g,now)=>{authenticate(g,args.hostToken,true);startGame(g,now);return {status:'running',endsAt:g.endsAt};});
  if(name==='record_decision')return change(args.gameId,(g,now,_journal,tx)=>{
@@ -40,7 +41,7 @@ export async function callTool(name:string,args:any,owner=''){
   tx.record({agentId:a.id,decisionId:args.requestId,round,source:'self_reported',provider:'external',model:args.model??a.model??null,reasoningEffort:args.reasoningEffort??null,observationTime,responseTime,executionTime,llmMs:Math.round(args.latencyMs),executionMs:responseTime!==null&&executionTime!==null?executionTime-responseTime:null,stalenessMs:observationTime!==null&&executionTime!==null?executionTime-observationTime:null,promptTokens:args.inputTokens??0,completionTokens:args.outputTokens??0,late:false,actions:args.actions??null,note:args.note??null,reasoning:args.reasoning??null});
   const result={recorded:true};g.receipts.push({agentId:a.id,id:args.requestId,result});g.receipts=g.receipts.slice(-500);return result;});
  if(name==='get_results')return change(args.gameId,(g)=>{authenticate(g,args.token);return {status:g.status};});
- if(!['get_order_book','get_position','get_atlas_history','get_fills','place_order','cancel_order','cancel_all','wait'].includes(name))throw new ArenaError('Unknown MCP tool.',404);
+ if(!['get_order_book','get_position','get_atlas_history','get_fills','place_order','replace_order','cancel_order','cancel_all','wait'].includes(name))throw new ArenaError('Unknown MCP tool.',404);
  return change(args.gameId,(g,now)=>runAction(g,args.agentToken,{...args,action:name},now));
 }
 type Book={bestBid:number|null;bestAsk:number|null};
@@ -50,7 +51,7 @@ const trimRules=leanSnapshot;
 // Per-action outcome against the book the model actually saw, so a missed fill caused by a moved book is visible.
 export function summarizeAction(action:Intent,outcome:{ok:boolean;result?:any;error?:string},observed:Book){
  const summary:Record<string,unknown>={action:action.action,ok:outcome.ok};
- if(action.action==='place_order'){
+ if(action.action==='place_order'||action.action==='replace_order'){
   const type=action.type??'limit',opposite=action.side==='buy'?observed.bestAsk:observed.bestBid;
   Object.assign(summary,{side:action.side,type,quantity:action.quantity,price:typeof action.price==='number'?action.price:null});
   const marketable=opposite!==null&&(type==='market'||(typeof action.price==='number'&&(action.side==='buy'?action.price>=opposite:action.price<=opposite)));

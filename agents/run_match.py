@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a complete timed match (180 seconds by default) with agents that trade through MCP.
+"""Run a timed match (market_relative 60s; hidden_center 180s by default) with agents that trade through MCP.
 
     python run_match.py --agents maker momentum
     python run_match.py --agents maker llm --provider sail --model MODEL_ID
@@ -13,7 +13,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from arena_agent import ArenaMCP, MarketMakerAgent, MomentumAgent, MeanReversionAgent, ModelAgent
+from arena_agent import ArenaMCP, MarketMakerAgent, MomentumAgent, MeanReversionAgent, ModelAgent, MCPError
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
@@ -21,8 +21,9 @@ def main():
     p.add_argument('--url', default=os.getenv('ARENA_URL', 'http://127.0.0.1:5173'))
     p.add_argument('--transport', choices=['auto', 'mcp', 'rest'], default=os.getenv('ARENA_TRANSPORT', 'auto'))
     p.add_argument('--seed', type=int, default=42)
-    p.add_argument('--duration', type=int, default=int(os.getenv('ARENA_DURATION_SECONDS', '180')),
-                   help='Round length in seconds, 30–600 (default 180).')
+    p.add_argument('--bot-mode', choices=['market_relative', 'hidden_center'], default=os.getenv('ARENA_BOT_MODE', 'market_relative'))
+    p.add_argument('--duration', type=int, default=int(os.environ['ARENA_DURATION_SECONDS']) if os.getenv('ARENA_DURATION_SECONDS') else None,
+                   help='Round length in seconds, 30–600 (default depends on bot mode).')
     p.add_argument('--interval', type=float, default=0,
                    help='Seconds between decision starts per agent; 0 (default) means as soon as the previous decision lands.')
     p.add_argument('--provider', choices=['modal', 'sail', 'fireworks'], default='sail')
@@ -41,7 +42,7 @@ def main():
         p.error('Modal agents need --base-url (a deployed OpenAI-compatible endpoint including /v1).')
     mcp = ArenaMCP(args.url, os.getenv('ARENA_SERVICE_TOKEN'), os.getenv('ARENA_MCP_TOKEN'), args.transport)
     print('Agent transport: ' + mcp.transport.upper())
-    created = mcp.call_tool('create_game', {'seed': args.seed, 'durationSeconds': args.duration})
+    created = mcp.call_tool('create_game', {'seed': args.seed, 'botMode': args.bot_mode, **({'durationSeconds': args.duration} if args.duration is not None else {})})
     game_id, host = created['state']['id'], created['hostToken']
     agents = []
     types = {'maker': MarketMakerAgent, 'momentum': MomentumAgent, 'mean-reversion': MeanReversionAgent}
