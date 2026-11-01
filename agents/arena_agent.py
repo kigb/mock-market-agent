@@ -265,7 +265,11 @@ def lean_snapshot(value):
     if isinstance(value, dict) and 'book' in value:
         me = (value.get('position') or {}).get('id')
         who = lambda ident: 'Atlas' if ident == '$atlas' else 'you' if ident == me else 'other'
-        lean = {k: v for k, v in value.items() if k not in ('rules', 'position', 'openOrders', 'recentFills')}
+        lean = {k: v for k, v in value.items() if k not in ('rules', 'position', 'openOrders', 'recentFills', 'atlas')}
+        atlas = value.get('atlas')
+        if isinstance(atlas, dict):
+            ticks = atlas.get('ticks')
+            lean['atlas'] = {**atlas, 'ticks': [{**t, 'executions': [{**x, 'maker': who(x.get('maker'))} for x in t.get('executions', [])]} if isinstance(t, dict) else t for t in ticks]} if isinstance(ticks, list) else atlas
         pos = value.get('position')
         if isinstance(pos, dict):
             lean['position'] = {k: pos.get(k) for k in ('position', 'cash', 'pnl', 'realizedPnl', 'unrealizedPnl', 'averageEntry')}

@@ -4,8 +4,9 @@ import {ArenaError,type Intent} from './engine.ts';
 export function leanSnapshot<T>(value:T):T{
  if(!value||typeof value!=='object'||!('book' in value))return value;
  const o=value as any,me=o.position?.id,who=(id:unknown)=>id==='$atlas'?'Atlas':id===me?'you':'other';
- const {rules:_rules,position,openOrders,recentFills,...rest}=o;
- return {...rest,
+ const {rules:_rules,position,openOrders,recentFills,atlas,...rest}=o;
+ const ticks=atlas&&Array.isArray(atlas.ticks)?atlas.ticks.map((t:any)=>Array.isArray(t.executions)?{...t,executions:t.executions.map((x:any)=>({...x,maker:who(x.maker)}))}:t):undefined;
+ return {...rest,...(atlas?{atlas:ticks?{...atlas,ticks}:atlas}:{}),
   // Only the trading view of the account; the full statistics stay in REST, the leaderboard, and the export.
   ...(position?{position:{position:position.position,cash:position.cash,pnl:position.pnl,realizedPnl:position.realizedPnl,unrealizedPnl:position.unrealizedPnl,averageEntry:position.averageEntry}}:{}),
   ...(Array.isArray(openOrders)?{openOrders:openOrders.map((x:any)=>({id:x.id,side:x.side,price:x.price,quantity:x.quantity}))}:{}),
