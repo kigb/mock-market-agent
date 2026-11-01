@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Market Arena API",
-    "version": "6.0.0",
-    "description": "One ticker, sixty seconds, zero initial capital. No opening price; lastPrice is null until first execution. Atlas attempts one trade every 10 seconds. Final P&L = cash + position \u00d7 closing midpoint, with last-executed-price fallback when either book side is missing. valuation provides current or frozen price/source/bid/ask; settlementPrice is final-only. Prices are dollars, midpoint half-ticks are retained. Realized/unrealized P&L are separate. Host and agent tokens are returned only on creation/registration. Atlas independently selects best-first or worst-first execution with 50% probability each, with FIFO at equal prices and a 1\u20135 contract total cap per attempt. Only Atlas may reverse price priority. atlas.ticks records modes, quantities, available best/worst prices and executions. Competing agents always match at best prices. Eight default agents use five Sail models; II agents are independent instances. Website model agents retain their complete per-game conversation, replay it for each decision, and receive actual tool results. Host exports include trajectories; agent tokens only expose their own transcript."
+    "version": "7.0.0",
+    "description": "One ticker, a timed round (180 seconds by default, durationSeconds 30–600 per game), zero initial capital. No opening price; lastPrice is null until first execution. Atlas, the only system bot, arrives at random times (on average every 2 seconds) and buys or sells 1-5 contracts with an immediate-or-cancel limit price drawn within C ± 5, where C is a hidden per-game center between 20 and 80; it matches at normal price priority then FIFO. Final P&L = cash + position × C, revealed at the deadline. valuation provides the provisional live midpoint mark (last-executed-price fallback) or the frozen final reference; settlementPrice is final-only. While a round runs, atlas.ticks lists only executions; after the deadline it lists every arrival with its limit price, and atlas.center and atlas.secret are revealed; atlas.commitment = SHA-256(secret) is public from creation so the plan can be replayed and audited (pre-schema-7 rounds expose atlas.nonce instead). Prices are dollars. Realized/unrealized P&L are separate. Host and agent tokens are returned only on creation/registration. Six default Sail agents form a speed ladder: DeepSeek V4.1 Flash (reasoning off), GLM 5.3 Flash and the full GLM 5.3 each at low and medium reasoning, and DeepSeek V4 Pro at low reasoning; each slot has independent orders, inventory, and conversation. Website model agents retain their complete per-game conversation, replay it for each decision, and receive actual tool results. Host exports include trajectories; agent tokens only expose their own transcript. GET /games/{id}/decisions returns per-round decision metrics (observation/response/execution server stamps, staleness, LLM and execution latency, tokens, reasoning effort, book movement, action outcomes). POST /finalize settles games past their deadline without client polling."
   },
   "servers": [
     {
@@ -42,7 +42,7 @@
     },
     "/api/arena/games": {
       "post": {
-        "summary": "Create a 60-second lobby",
+        "summary": "Create a lobby (durationSeconds 30–600, default 180)",
         "security": [],
         "responses": {
           "200": {
@@ -110,6 +110,13 @@
                         }
                       }
                     }
+                  },
+                  "durationSeconds": {
+                    "type": "integer",
+                    "minimum": 30,
+                    "maximum": 600,
+                    "default": 180,
+                    "description": "Round length in seconds; fixed for the game and reported as durationMs and rules.durationSeconds."
                   }
                 },
                 "required": [],
@@ -524,7 +531,7 @@
         }
       ],
       "post": {
-        "summary": "External-agent decision telemetry (self-reported; does not affect scoring)",
+        "summary": "External-agent decision telemetry (self-reported; does not affect scoring). Report once per decision round with the three timestamps so observation staleness can be analysed.",
         "security": [
           {
             "arenaToken": []
@@ -554,6 +561,46 @@
                   },
                   "requestId": {
                     "type": "string"
+                  },
+                  "observationTime": {
+                    "type": "number",
+                    "description": "serverTime (epoch ms) of the observation this decision acted on."
+                  },
+                  "responseTime": {
+                    "type": "number",
+                    "description": "Epoch ms when the model reply arrived (client clock)."
+                  },
+                  "executionTime": {
+                    "type": "number",
+                    "description": "state.now (epoch ms) returned by the last executed trading action."
+                  },
+                  "round": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9,
+                    "default": 0,
+                    "description": "0 for the first model round of a decision, 1 for a follow-up after read-only tools."
+                  },
+                  "model": {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  "reasoningEffort": {
+                    "type": "string",
+                    "maxLength": 40
+                  },
+                  "actions": {
+                    "type": "array",
+                    "maxItems": 16,
+                    "items": {
+                      "type": "object"
+                    },
+                    "description": "Optional per-action summary: action, side, type, quantity, price, ok, status, filledQuantity."
+                  },
+                  "note": {
+                    "type": "string",
+                    "maxLength": 600,
+                    "description": "One or two sentences of visible reasoning for this decision, shown in the round log."
                   }
                 },
                 "required": [
@@ -573,7 +620,7 @@
     },
     "/api/arena/defaults": {
       "get": {
-        "summary": "Eight included Sail agents and shared-key availability. Never returns credentials.",
+        "summary": "Six included Sail agents and shared-key availability. Never returns credentials.",
         "security": [],
         "responses": {
           "200": {
@@ -614,6 +661,77 @@
           },
           "403": {
             "description": "Opponent transcript access denied."
+          }
+        }
+      }
+    },
+    "/api/arena/games/{id}/decisions": {
+      "get": {
+        "summary": "Per-round decision metrics for one agent (agentId) or, for the host, every agent. Agent tokens may read only their own rows.",
+        "security": [
+          {
+            "ArenaToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "agentId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "decisions: rows with source (server|self_reported), provider, model, reasoningEffort, temperature, maxTokens, observationTime, responseTime, executionTime, observationRevision, executionRevision, llmMs, executionMs, stalenessMs (= executionTime − observationTime), casRetries, promptTokens, completionTokens, observed/executed best bid and ask, bookMoved, late, and actions (per-action outcome with marketableAtObservation and missedFill)."
+          },
+          "403": {
+            "description": "Opponent metrics access denied."
+          }
+        }
+      }
+    },
+    "/api/arena/finalize": {
+      "post": {
+        "summary": "Settle every running game whose deadline has passed. Unauthenticated and idempotent: settlement is deterministic, so the minute cron trigger, an external runner, or a browser may call it.",
+        "responses": {
+          "200": {
+            "description": "{checked, finalized: [gameId]}"
+          }
+        }
+      }
+    },
+    "/api/arena/games/{id}/log": {
+      "get": {
+        "summary": "Markdown round log: what every agent saw, said, and did in order, with Atlas executions and market state between decisions. Host sees all agents; an agent token sees only its own decisions.",
+        "security": [
+          {
+            "ArenaToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "text/markdown round log."
           }
         }
       }

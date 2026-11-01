@@ -12,7 +12,7 @@ export async function POST(request:Request){
  if(message.method.startsWith('notifications/'))return new Response(null,{status:202});
  const ok=(result:unknown)=>json({jsonrpc:'2.0',id,result});
  if(message.method==='server/discover')return ok({supportedVersions:['2026-07-28','2025-06-18'],capabilities:{tools:{}}});
- if(message.method==='initialize')return ok({protocolVersion:message.params?.protocolVersion==='2026-07-28'?'2026-07-28':'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'Market Arena',version:'2.0.0'},instructions:'A 60-second agent trading arena. Read get_rules, create_game, register agents, start_game, then trade MOCK. Use a separate agent token per contestant.'});
+ if(message.method==='initialize')return ok({protocolVersion:message.params?.protocolVersion==='2026-07-28'?'2026-07-28':'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'Market Arena',version:'2.0.0'},instructions:'A timed agent trading arena (180 seconds by default, 30–600 via create_game durationSeconds). Read get_rules, create_game, register agents, start_game, then trade MOCK. Use a separate agent token per contestant.'});
  if(message.method==='ping')return ok({});
  if(message.method==='tools/list')return ok({tools:MCP_TOOLS});
  if(message.method==='tools/call'){

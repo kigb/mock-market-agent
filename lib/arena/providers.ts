@@ -1,7 +1,13 @@
 import {ArenaError,type Intent,type Agent, type Game,observation,orderBook} from './engine.ts';
 import {normalizeCompletion,type ChatMessage} from './conversation.ts';
-import {MODEL_TOOLS,SYSTEM_PROMPT} from './protocol.ts';
-export type ModelConfig={provider:'modal'|'sail'|'fireworks';model:string;apiKey:string;baseUrl?:string;temperature?:number;maxTokens?:number;prompt?:string;reasoningEffort?:'none'|'low';};
+import {MODEL_TOOLS,systemPrompt} from './protocol.ts';
+export const REASONING_EFFORTS=['none','low','medium','high'] as const;
+// Per-call provider timeout. The game clock keeps running meanwhile, so slow models pay in staleness rather than being excluded.
+export const PROVIDER_TIMEOUT_MS=60000;
+export type ReasoningEffort=typeof REASONING_EFFORTS[number];
+export type ModelConfig={provider:'modal'|'sail'|'fireworks';model:string;apiKey:string;baseUrl?:string;temperature?:number;maxTokens?:number;prompt?:string;reasoningEffort?:ReasoningEffort;};
+// Sail exposes OpenAI-style reasoning_effort; other providers receive no reasoning parameter, so the recorded value is null there.
+export function effectiveReasoningEffort(config:ModelConfig|undefined){return config?.provider==='sail'&&config.reasoningEffort?config.reasoningEffort:null;}
 export function endpoint(config:ModelConfig){
  if(!['modal','sail','fireworks'].includes(config.provider))throw new ArenaError('Choose Modal, Sail Research, or Fireworks.');
  if(typeof config.apiKey!=='string'||config.apiKey.length>2048||/[\r\n]/.test(config.apiKey))throw new ArenaError('Invalid API key.');
@@ -24,13 +30,14 @@ export function parseDecision(data:any):Intent[]{
  }
  throw new ArenaError('The model produced no trading decision (possibly exhausted its token budget).');
 }
-async function requestCompletion(config:ModelConfig,messages:ChatMessage[],timeoutMs:number,fetcher:typeof fetch=fetch){
+async function requestCompletion(config:ModelConfig,messages:ChatMessage[],timeoutMs:number,fetcher:typeof fetch=fetch,rules?:object){
  const url=endpoint(config),temperature=config.temperature??0.3,maxTokens=config.maxTokens??512;
  if(!Number.isFinite(temperature)||temperature<0||temperature>2)throw new ArenaError('Temperature must be 0–2.');
  if(!Number.isInteger(maxTokens)||maxTokens<64||maxTokens>4096)throw new ArenaError('Max output tokens must be 64–4096.');
  if(config.prompt&&config.prompt.length>4000)throw new ArenaError('Strategy prompt must be at most 4,000 characters.');
+ if(config.reasoningEffort!==undefined&&config.reasoningEffort!==null&&!REASONING_EFFORTS.includes(config.reasoningEffort))throw new ArenaError('Reasoning effort must be none, low, medium, or high.');
  const started=Date.now();let response:Response;
- try{response=await fetcher(url,{method:'POST',redirect:'manual',headers:{'Content-Type':'application/json',...(config.apiKey.trim()?{Authorization:'Bearer '+config.apiKey.trim()}:{})},body:JSON.stringify({model:config.model.trim(),messages:[{role:'system',content:SYSTEM_PROMPT+(config.prompt?'\nYour strategy: '+config.prompt:'')},...messages],tools:MODEL_TOOLS,tool_choice:'auto',parallel_tool_calls:true,temperature,...(config.provider==='sail'?{max_completion_tokens:maxTokens,metadata:{completion_window:'asap'},...(config.reasoningEffort?{reasoning_effort:config.reasoningEffort}:{})}:{max_tokens:maxTokens}),stream:false}),signal:AbortSignal.timeout(Math.max(100,Math.min(12000,timeoutMs)))});}catch(error){
+ try{response=await fetcher(url,{method:'POST',redirect:'manual',headers:{'Content-Type':'application/json',...(config.apiKey.trim()?{Authorization:'Bearer '+config.apiKey.trim()}:{})},body:JSON.stringify({model:config.model.trim(),messages:[{role:'system',content:systemPrompt(rules)+(config.prompt?'\nYour strategy: '+config.prompt:'')},...messages],tools:MODEL_TOOLS,tool_choice:'auto',parallel_tool_calls:true,temperature,...(config.provider==='sail'?{max_completion_tokens:maxTokens,metadata:{completion_window:'asap'},...(config.reasoningEffort?{reasoning_effort:config.reasoningEffort}:{})}:{max_tokens:maxTokens}),stream:false}),signal:AbortSignal.timeout(Math.max(100,Math.min(PROVIDER_TIMEOUT_MS,timeoutMs)))});}catch(error){
   const detail=error instanceof Error?(config.apiKey?error.message.replaceAll(config.apiKey,'[redacted]'):error.message).slice(0,300):'Unknown transport error';
   console.error('Provider transport failure',{provider:config.provider,name:error instanceof Error?error.name:'Unknown',detail});
   throw new ArenaError(error instanceof Error&&/abort|timeout/i.test(error.name+' '+error.message)?'Provider timed out. The game clock keeps running.':'Could not reach the provider. Check the endpoint and its deployment.',502);}
@@ -40,7 +47,7 @@ async function requestCompletion(config:ModelConfig,messages:ChatMessage[],timeo
  let data:any;try{data=JSON.parse(text);}catch{throw new ArenaError('The provider did not return JSON.',502);}
  return {data,latencyMs:Date.now()-started,usage:{promptTokens:Number(data.usage?.prompt_tokens)||0,completionTokens:Number(data.usage?.completion_tokens)||0}};
 }
-export async function complete(config:ModelConfig,messages:ChatMessage[],timeoutMs:number,fetcher:typeof fetch=fetch){const {data,...meta}=await requestCompletion(config,messages,timeoutMs,fetcher);return {...normalizeCompletion(data),...meta};}
+export async function complete(config:ModelConfig,messages:ChatMessage[],timeoutMs:number,fetcher:typeof fetch=fetch,rules?:object){const {data,...meta}=await requestCompletion(config,messages,timeoutMs,fetcher,rules);return {...normalizeCompletion(data),...meta};}
 export async function infer(config:ModelConfig,observed:unknown,timeoutMs:number,fetcher:typeof fetch=fetch){const {data,...meta}=await requestCompletion(config,[{role:'user',content:JSON.stringify(observed)}],timeoutMs,fetcher);return {actions:parseDecision(data),...meta};}
 export function baseline(g:Game,a:Agent):Intent[]{
  const book=orderBook(g),quote=(side:'buy'|'sell',p:number,q=5):Intent=>({action:'place_order',type:'limit',side,quantity:q,price:Math.round(Math.max(0,Math.min(100,p))*100)/100});

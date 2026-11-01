@@ -1,4 +1,24 @@
 import {ArenaError,type Intent} from './engine.ts';
+// Model-facing view of a market snapshot: the static rules are in the system prompt, the account is reduced to its trading
+// view, orders and fills are compact, and every Atlas execution so far is kept. REST/MCP observations keep every field.
+export function leanSnapshot<T>(value:T):T{
+ if(!value||typeof value!=='object'||!('book' in value))return value;
+ const o=value as any,me=o.position?.id,who=(id:unknown)=>id==='$atlas'?'Atlas':id===me?'you':'other';
+ const {rules:_rules,position,openOrders,recentFills,...rest}=o;
+ return {...rest,
+  // Only the trading view of the account; the full statistics stay in REST, the leaderboard, and the export.
+  ...(position?{position:{position:position.position,cash:position.cash,pnl:position.pnl,realizedPnl:position.realizedPnl,unrealizedPnl:position.unrealizedPnl,averageEntry:position.averageEntry}}:{}),
+  ...(Array.isArray(openOrders)?{openOrders:openOrders.map((x:any)=>({id:x.id,side:x.side,price:x.price,quantity:x.quantity}))}:{}),
+  ...(Array.isArray(recentFills)?{recentFills:recentFills.map((f:any)=>({time:f.time,side:f.side,price:f.price,quantity:f.quantity,taker:who(f.taker),maker:who(f.maker)}))}:{})} as T;
+}
+// Model-facing tool result: an order outcome shrinks to what the next decision needs; read tools return lean snapshots.
+export function leanToolResult<T extends {ok:boolean;result?:any}>(entry:T):T{
+ if(!entry.ok||!entry.result||typeof entry.result!=='object')return entry;
+ const r=entry.result;
+ if('filledQuantity' in r)return {...entry,result:{orderId:r.orderId,status:r.status,filled:r.filledQuantity,...(r.filledQuantity?{averageFillPrice:r.averageFillPrice}:{}),...(r.remainingQuantity?{resting:r.remainingQuantity}:{})}};
+ if('book' in r)return {...entry,result:leanSnapshot(r)};
+ return entry;
+}
 export type ToolCall={id:string;type:'function';function:{name:string;arguments:string}};
 export type ChatMessage={role:'user'|'assistant'|'tool';content:string|null;tool_calls?:ToolCall[];tool_call_id?:string};
 export type Completion={message:ChatMessage;calls:{id:string;intent:Intent}[];latencyMs:number;usage:{promptTokens:number;completionTokens:number}};
