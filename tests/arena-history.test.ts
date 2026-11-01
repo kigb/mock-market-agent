@@ -66,11 +66,11 @@ test('tool IDs survive replay, duplicate IDs are repaired, and visible prose end
  assert.equal(normalizeCompletion({choices:[{message:{content:'No additional action this turn.'}}]}).calls.length,0);
  const bad=normalizeCompletion({choices:[{message:{tool_calls:[{id:'invalid',function:{name:'place_order',arguments:'{broken'}}]}}]});assert.equal(bad.calls[0].id,'invalid');assert.equal(bad.calls[0].intent.action,'invalid_tool_arguments');
 });
-test('information loops stop at their call/action budget and never start inference past the deadline',async()=>{
+test('information loops stop at the three-round cap and never start inference past the deadline',async()=>{
  let calls=0,commits=0;
  const fake=():Completion=>({...normalizeCompletion({choices:[{message:{tool_calls:[tool('r'+calls,'get_position',{}),tool('b'+calls,'get_order_book',{})]}}]}),latencyMs:0,usage:{promptTokens:0,completionTokens:0}});
- await converse({messages:[],deadline:100,now:()=>0,beforeCall:async()=>true,complete:async()=>{calls++;return fake();},commit:async(o,budget)=>{commits++;assert.equal(budget,commits===1?4:2);return {replies:o.calls.map(c=>({role:'tool',tool_call_id:c.id,content:'{}'}))};}});
- assert.equal(calls,2);assert.equal(commits,2);
+ await converse({messages:[],deadline:100,now:()=>0,beforeCall:async()=>true,complete:async()=>{calls++;return fake();},commit:async(o,round)=>{commits++;assert.equal(round,commits-1);return {replies:o.calls.map(c=>({role:'tool',tool_call_id:c.id,content:'{}'}))};}});
+ assert.equal(calls,3);assert.equal(commits,3);
  await converse({messages:[],deadline:100,now:()=>100,beforeCall:async()=>{throw Error('must not run');},complete:async()=>fake(),commit:async()=>({replies:[]})});
 });
 test('persisted conversations redact actual credentials without changing tool IDs or roles',()=>{

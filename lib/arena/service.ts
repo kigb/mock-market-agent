@@ -86,11 +86,11 @@ export async function decision(id:string,token:string,config:ModelConfig|undefin
   if(!checked.result)return false;
   if(claim.result.preset)await reserveDefaultCall();return true;
  };
- const commit=async(outcome:Completion,budget:number,round=0)=>{
+ const commit=async(outcome:Completion,round=0)=>{
   const startStep=step;const messageCount=1+outcome.calls.length;
   const applied=await change(id,(g,now,journal,tx)=>{
    const a=agentAuth(g,token),late=g.status!=='running'||a.leaseId!==leaseId,before=orderBook(g);
-   const results=outcome.calls.map((call,i)=>{if(late)return {action:call.intent.action,ok:false,error:'Game deadline or decision lease passed; action was not executed.'};if(i>=budget)return {action:call.intent.action,ok:false,error:'The four-tool decision budget is exhausted; action was not executed.'};try{return {action:call.intent.action,ok:true,result:trimRules(runAction(g,token,{...call.intent,requestId:leaseId+':'+startStep+':'+i},now))};}catch(e){a.errors++;const error=e instanceof ArenaError?e.message:'Trading action failed.';addEvent(g,now,a.id,'error',error);return {action:call.intent.action,ok:false,error};}});
+   const results=outcome.calls.map((call,i)=>{if(late)return {action:call.intent.action,ok:false,error:'Game deadline or decision lease passed; action was not executed.'};try{return {action:call.intent.action,ok:true,result:trimRules(runAction(g,token,{...call.intent,requestId:leaseId+':'+startStep+':'+i},now))};}catch(e){a.errors++;const error=e instanceof ArenaError?e.message:'Trading action failed.';addEvent(g,now,a.id,'error',error);return {action:call.intent.action,ok:false,error};}});
    const replies:ChatMessage[]=results.map((result,i)=>({role:'tool',tool_call_id:outcome.calls[i].id,content:JSON.stringify(leanToolResult(result))}));
    // Read results are ephemeral: later turns replay a one-line reminder instead of the data.
    const replays=results.map((result,i)=>READ_TOOLS.has(outcome.calls[i].intent.action)&&result.ok?{role:'tool' as const,tool_call_id:outcome.calls[i].id,content:JSON.stringify(readSummary(outcome.calls[i].intent.action,result.result))}:null);
@@ -100,13 +100,13 @@ export async function decision(id:string,token:string,config:ModelConfig|undefin
    tx.record({agentId:a.id,decisionId:leaseId,round,source:'server',provider:a.provider,model:a.model??null,reasoningEffort:effectiveReasoningEffort(config),temperature:config?config.temperature??.3:null,maxTokens:config?config.maxTokens??512:null,observationTime:inputTime,responseTime:config?responded:null,executionTime:now,observationRevision:inputRevision,executionRevision:tx.revision,llmMs:config?outcome.latencyMs:null,executionMs:config?now-responded:null,stalenessMs:now-inputTime,casRetries:tx.attempt,promptTokens:outcome.usage.promptTokens,completionTokens:outcome.usage.completionTokens,observedBestBid:inputBook.bestBid,observedBestAsk:inputBook.bestAsk,executedBestBid:before.bestBid,executedBestAsk:before.bestAsk,bookMoved:inputBook.bestBid!==before.bestBid||inputBook.bestAsk!==before.bestAsk,late,actions:outcome.calls.map((call,i)=>summarizeAction(call.intent,results[i],inputBook)),note:config&&typeof outcome.message.content==='string'?outcome.message.content:null,reasoning:outcome.reasoning??null});
    const after=orderBook(g);return {replies,late,results,book:{bestBid:after.bestBid,bestAsk:after.bestAsk} as Book};
   });
-  inferenceStarted=0;respondedAt=0;step+=messageCount;totalActions+=Math.min(outcome.calls.length,budget);totalRounds++;
+  inferenceStarted=0;respondedAt=0;step+=messageCount;totalActions+=outcome.calls.length;totalRounds++;
   inputTime=applied.state.now;inputRevision=applied.revision;inputBook=applied.result.book;
   return applied.result;
  };
  try{
   if(claim.result.preset){const p=defaultAgent(claim.result.preset);if(!p||!env.SAIL_API_KEY)throw new ArenaError('The arena’s default Sail agents are unavailable. Add an agent with your own provider key.',503);config={provider:'sail',model:p.model,apiKey:env.SAIL_API_KEY,temperature:.3,maxTokens:p.maxTokens??DEFAULT_MAX_TOKENS,prompt:DEFAULT_STRATEGY,reasoningEffort:p.reasoningEffort};}
-  if(claim.result.actions){if(await beforeCall())await commit(scriptedCompletion(claim.result.actions),4);}
+  if(claim.result.actions){if(await beforeCall())await commit(scriptedCompletion(claim.result.actions));}
   else{
    const messages=await replayMessages(id,agentId);
    const rules=claim.result.rules;

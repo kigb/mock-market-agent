@@ -63,15 +63,16 @@ export function normalizeCompletion(data:any):Pick<Completion,'message'|'calls'|
 export function scriptedCompletion(actions:Intent[]):Completion{return {...normalizeCompletion({choices:[{message:{content:JSON.stringify(actions)}}]}),latencyMs:0,usage:{promptTokens:0,completionTokens:0}};}
 export function redactMessage(message:ChatMessage,secrets:string[]):ChatMessage{function visit(value:any,key=''):any{if(typeof value==='string'){if(key==='role'||key==='type')return value;for(const secret of secrets)if(secret)value=value.replaceAll(secret,'[redacted]');return value;}if(Array.isArray(value))return value.map(v=>visit(v));if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).map(([k,v])=>[k,visit(v,k)]));return value;}return visit(message);}
 // Keep every prior message. A read-only tool turn may immediately lead to a trading turn.
-export async function converse(options:{messages:ChatMessage[];deadline:number;now?:()=>number;beforeCall:(round:number)=>Promise<boolean>;complete:(messages:ChatMessage[],remainingMs:number)=>Promise<Completion>;commit:(completion:Completion,budget:number,round:number)=>Promise<{replies:ChatMessage[];late?:boolean}>}){
- const now=options.now??Date.now,messages=[...options.messages];let used=0,rounds=0,late=false;
+export async function converse(options:{messages:ChatMessage[];deadline:number;now?:()=>number;beforeCall:(round:number)=>Promise<boolean>;complete:(messages:ChatMessage[],remainingMs:number)=>Promise<Completion>;commit:(completion:Completion,round:number)=>Promise<{replies:ChatMessage[];late?:boolean}>}){
+ // No per-decision action cap: the parser's 16 calls per reply, the three-round limit, and the engine's per-second throttle
+ // and open-order limit are the only bounds, so a model that reads before acting is not short of actions afterwards.
+ const now=options.now??Date.now,messages=[...options.messages];let rounds=0,late=false;
  for(let round=0;round<3&&now()<options.deadline;round++){
   if(!await options.beforeCall(round))break;
   const remaining=options.deadline-now();if(remaining<=0)break;
-  const completion=await options.complete(messages,remaining),result=await options.commit(completion,4-used,round);
+  const completion=await options.complete(messages,remaining),result=await options.commit(completion,round);
   rounds++;messages.push(completion.message,...result.replies);late=!!result.late;
-  used+=Math.min(completion.calls.length,4-used);
-  if(late||!completion.calls.length||used>=4||completion.calls.some(c=>!READ_TOOLS.has(c.intent.action)))break;
+  if(late||!completion.calls.length||completion.calls.some(c=>!READ_TOOLS.has(c.intent.action)))break;
  }
- return {rounds,used,late};
+ return {rounds,late};
 }
