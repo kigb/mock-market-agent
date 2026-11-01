@@ -1,4 +1,9 @@
-# Market Arena: agent starter
+# Market Arena agent starter
+
+Use `python run_match.py --bot-mode market_relative --agents maker momentum` for the default 60-second market-relative game. Use `--bot-mode hidden_center` for the 180-second hidden-value game; `--duration 30` overrides either mode. Provider credentials stay in environment variables. Baselines obey the selected risk bounds and protective market prices; model agents receive the exact per-game rules.
+
+Market-relative Atlas uses current mid ± random 0.01–0.50 tolerance, skips one-sided or >1.00-wide books, and has no hidden center. Inventory settles at the final 10-second trade VWAP with full-round fallback. Hidden-center mode retains C ± 5 and settlement at C. Modes are fixed when the game is created. `verify_atlas.py` supports both replay protocols.
+
 
 Python 3.10+. Standard library only. Every order and observation uses the shared arena engine through MCP or REST.
 
@@ -7,15 +12,15 @@ Python 3.10+. Standard library only. Every order and observation uses the shared
 Run beside the supplied Python files:
 
 ```sh
-export ARENA_URL="https://clob-market-lab-fx2026.bronzejam128.chatgpt.site"
+export ARENA_URL="https://clob-market-lab-fx2026.kfangyixiong.chatgpt.site"
 python run_match.py --agents maker momentum
 ```
 
-The command automatically uses MCP locally or when authenticated. On hosted MCP HTTP 401, it announces a switch to the public REST API using per-agent tokens. It creates a lobby, registers two agents, starts the clock (180 s by default; `--duration 30`–`600`), runs both strategies concurrently, and saves a credential-free `arena-results.json` with final leaderboard, positions, P&L, volume, model usage, latency, fills, and events. It makes no paid model calls with the default strategies.
+The command automatically uses MCP locally or when authenticated. On hosted MCP HTTP 401, it announces a switch to the public REST API using per-agent tokens. It creates a lobby, registers two agents, starts the clock (60 s in market-relative, 180 s in hidden-center mode; `--duration 30`–`600`), runs both strategies concurrently, and saves a credential-free `arena-results.json` with final leaderboard, positions, P&L, volume, model usage, latency, fills, and events. It makes no paid model calls with the default strategies.
 
 Choices: `maker`, `momentum`, `mean-reversion`, `llm`. Up to eight agents. All participant agents supply liquidity; Atlas is the only system bot and never quotes. The book and trade history start empty, with no provided opening price. `lastPrice` is `None` until agents execute the first trade. Starter strategies independently choose their own opening quote, then respond to the book and executed prices.
 
-Atlas arrives at random times (on average every 2 seconds) and buys or sells 1–5 contracts with a limit price drawn within C ± 5, where C is a hidden per-game center between 20 and 80. It fills at normal price priority and FIFO, only at prices within its limit, and cancels any remainder. All models see these rules. While the round runs, `get_order_book` shows only Atlas executions in `atlas.ticks`; after the deadline, `results.atlas` reveals C (`center`), every arrival with its limit price, and the nonce that reproduces them.
+The selected mode determines Atlas: market-relative uses current midpoint ± tolerance and exposes attempted-event limits/skips; hidden-center uses C ± 5 and conceals limits/unfilled arrivals until the close. Both use normal price priority/FIFO and cancel unfilled quantity. Neither posts liquidity. Read the returned game rules instead of assuming a fixed bot.
 
 Choose a provider endpoint whose context window can fit the full round. Sail’s Gemma 12B endpoint is limited to 16K; the website defaults use larger-context models. Context-limit errors preserve the transcript and are reported explicitly.
 
@@ -80,9 +85,10 @@ The default `--transport auto` tries MCP and, only on HTTP 401 during initializa
 
 ## Clock and scoring
 
-Prices: 0–100 inclusive, 0.01 tick. Quantities: 1–1,000 whole contracts. A fixed round (180 seconds by default; 30–600 chosen when the lobby is created), zero starting cash/inventory, long/short enabled, zero fees. Rank by final total P&L = cash + position × C, the hidden Atlas center revealed at the deadline. Quotes cannot move it. Realized and unrealized P&L, inventory, average entry, and cash are reported separately. Inventory valuation creates no liquidation trade. Live `valuation` is a provisional midpoint (or last-trade) mark; final `settlementPrice` and `valuation` are frozen at C. Ties: filled quantity, then name. Agent actions must reach the server before the deadline; late model responses are discarded. Unfilled orders expire at the end.
+Prices are 0–100 in 0.01 ticks, with zero starting cash/inventory and no fees. Long and short are enabled. Market-relative mode limits quantity and reserved inventory to 20, settles at final-window/full-round VWAP, and requires protective prices for taking. Hidden-center mode preserves quantity up to 1,000 and settlement at C. Live marks are provisional. Late actions cannot trade. Results retain inventory at freeze plus a cash-settlement archive when available.
 
-Atlas's center and arrival schedule come from a 32-byte secret committed as `atlas.commitment = SHA-256(secret)` when the game is created and revealed as `atlas.secret` at the end. `python verify_atlas.py arena-results.json` recomputes the commitment, C, and every arrival from `SHA-256(secret || seed || counter)` and compares them with the revealed `atlas.ticks`, so any participant can confirm the round was not altered. HTTP arrival times and model latency still mean two runs are not guaranteed to have identical outcomes. Atlas arrivals advance using server timestamps whenever the API is accessed; finalization processes every arrival before the deadline even if nobody polls. No model inference runs inside those catch-up arrivals.
+`python verify_atlas.py arena-results.json` verifies the secret commitment and mode-specific draws. For market-relative mode it also checks recorded book-based limits/skips and quantity/price protection. Full FIFO verification needs the ordered exchange action log. Reproducing identical randomness does not guarantee identical prices when actions or timing differ. Atlas advances on committed server events/access and the existing finalization sweep.
+
 
 The six included website agents use the arena’s server-side Sail secret. Added website agents’ provider keys live only in browser memory and individual inference requests. This independent Python client uses its own provider key for model agents. Keep the tab open for website runners. This Python runner runs independently, including when the website is closed. Website hosts can read `GET /api/arena/games/{id}/history?agentId={agentId}` with their host token; agent tokens can read only their own transcript. Website exports contain `trajectories` and `decisions`; `run_match.py` saves both as well, plus a Markdown round log next to the results file (`arena-results.md` by default), and `GET /api/arena/games/{id}/decisions` returns the per-round metrics for your own agents. Results retain bounded recent public fills/events and up to 500 order idempotency receipts. Export results after the game for a local report.
 

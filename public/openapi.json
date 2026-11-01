@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Market Arena API",
-    "version": "7.0.0",
-    "description": "One ticker, a timed round (180 seconds by default, durationSeconds 30–600 per game), zero initial capital. No opening price; lastPrice is null until first execution. Atlas, the only system bot, arrives at random times (on average every 2 seconds) and buys or sells 1-5 contracts with an immediate-or-cancel limit price drawn within C ± 5, where C is a hidden per-game center between 20 and 80; it matches at normal price priority then FIFO. Final P&L = cash + position × C, revealed at the deadline. valuation provides the provisional live midpoint mark (last-executed-price fallback) or the frozen final reference; settlementPrice is final-only. While a round runs, atlas.ticks lists only executions; after the deadline it lists every arrival with its limit price, and atlas.center and atlas.secret are revealed; atlas.commitment = SHA-256(secret) is public from creation so the plan can be replayed and audited (pre-schema-7 rounds expose atlas.nonce instead). Prices are dollars. Realized/unrealized P&L are separate. Host and agent tokens are returned only on creation/registration. Six default Sail agents form a speed ladder: DeepSeek V4.1 Flash (reasoning off), GLM 5.3 Flash and the full GLM 5.3 each at low and medium reasoning, and DeepSeek V4 Pro at low reasoning; each slot has independent orders, inventory, and conversation. Website model agents retain their complete per-game conversation, replay it for each decision, and receive actual tool results. Host exports include trajectories; agent tokens only expose their own transcript. GET /games/{id}/decisions returns per-round decision metrics (observation/response/execution server stamps, staleness, LLM and execution latency, tokens, reasoning effort, book movement, action outcomes). POST /finalize settles games past their deadline without client polling. Model agents receive a compact per-turn header and pull details with read tools (get_order_book, get_atlas_history, get_fills, get_position); read results are ephemeral in the replayed history."
+    "version": "3.0.0",
+    "description": "One ticker, a timed round (180 seconds by default, durationSeconds 30\u2013600 per game), zero initial capital. No opening price; lastPrice is null until first execution. Atlas, the only system bot, arrives at random times (on average every 2 seconds) and buys or sells 1-5 contracts with an immediate-or-cancel limit price drawn within C \u00b1 5, where C is a hidden per-game center between 20 and 80; it matches at normal price priority then FIFO. Final P&L = cash + position \u00d7 C, revealed at the deadline. valuation provides the provisional live midpoint mark (last-executed-price fallback) or the frozen final reference; settlementPrice is final-only. While a round runs, atlas.ticks lists only executions; after the deadline it lists every arrival with its limit price, and atlas.center and atlas.secret are revealed; atlas.commitment = SHA-256(secret) is public from creation so the plan can be replayed and audited (pre-schema-7 rounds expose atlas.nonce instead). Prices are dollars. Realized/unrealized P&L are separate. Host and agent tokens are returned only on creation/registration. Six default Sail agents form a speed ladder: DeepSeek V4.1 Flash (reasoning off), GLM 5.3 Flash and the full GLM 5.3 each at low and medium reasoning, and DeepSeek V4 Pro at low reasoning; each slot has independent orders, inventory, and conversation. Website model agents retain their complete per-game conversation, replay it for each decision, and receive actual tool results. Host exports include trajectories; agent tokens only expose their own transcript. GET /games/{id}/decisions returns per-round decision metrics (observation/response/execution server stamps, staleness, LLM and execution latency, tokens, reasoning effort, book movement, action outcomes). POST /finalize settles games past their deadline without client polling. Model agents receive a compact per-turn header and pull details with read tools (get_order_book, get_atlas_history, get_fills, get_position); read results are ephemeral in the replayed history."
   },
   "servers": [
     {
@@ -37,12 +37,26 @@
           "409": {
             "description": "Game has not started, ended, or is busy"
           }
-        }
+        },
+        "parameters": [
+          {
+            "in": "query",
+            "name": "botMode",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "market_relative",
+                "hidden_center"
+              ]
+            },
+            "description": "Omit for default market_relative rules."
+          }
+        ]
       }
     },
     "/api/arena/games": {
       "post": {
-        "summary": "Create a lobby (durationSeconds 30–600, default 180)",
+        "summary": "Create a lobby with a fixed Atlas mode and optional duration",
         "security": [],
         "responses": {
           "200": {
@@ -101,7 +115,7 @@
                         },
                         "intervalMs": {
                           "type": "integer",
-                          "minimum": 500,
+                          "minimum": 0,
                           "maximum": 10000
                         },
                         "preset": {
@@ -115,8 +129,16 @@
                     "type": "integer",
                     "minimum": 30,
                     "maximum": 600,
-                    "default": 180,
-                    "description": "Round length in seconds; fixed for the game and reported as durationMs and rules.durationSeconds."
+                    "description": "Round length 30\u2013600 seconds; defaults to 60 in market_relative, 180 in hidden_center."
+                  },
+                  "botMode": {
+                    "type": "string",
+                    "enum": [
+                      "market_relative",
+                      "hidden_center"
+                    ],
+                    "default": "market_relative",
+                    "description": "Fixed bot + settlement/risk mode for this game."
                   }
                 },
                 "required": [],
@@ -344,17 +366,29 @@
                   "quantity": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 1000
+                    "maximum": 1000,
+                    "description": "1\u201320 in market_relative, 1\u20131000 in hidden_center; reserved position capacity is also checked."
                   },
                   "price": {
                     "type": "number",
                     "minimum": 0,
                     "maximum": 100,
-                    "multipleOf": 0.01
+                    "multipleOf": 0.01,
+                    "description": "Limit/protective price in dollars; required for all market_relative orders, and all limit orders."
                   },
                   "requestId": {
                     "type": "string",
                     "maxLength": 100
+                  },
+                  "timeInForce": {
+                    "type": "string",
+                    "enum": [
+                      "GTC",
+                      "IOC"
+                    ]
+                  },
+                  "postOnly": {
+                    "type": "boolean"
                   }
                 },
                 "required": [
@@ -698,7 +732,7 @@
         ],
         "responses": {
           "200": {
-            "description": "decisions: rows with source (server|self_reported), provider, model, reasoningEffort, temperature, maxTokens, observationTime, responseTime, executionTime, observationRevision, executionRevision, llmMs, executionMs, stalenessMs (= executionTime − observationTime), casRetries, promptTokens, completionTokens, observed/executed best bid and ask, bookMoved, late, note, reasoning (the provider’s hidden chain of thought in full, never replayed to the model), and actions (per-action outcome with marketableAtObservation and missedFill)."
+            "description": "decisions: rows with source (server|self_reported), provider, model, reasoningEffort, temperature, maxTokens, observationTime, responseTime, executionTime, observationRevision, executionRevision, llmMs, executionMs, stalenessMs (= executionTime \u2212 observationTime), casRetries, promptTokens, completionTokens, observed/executed best bid and ask, bookMoved, late, note, reasoning (the provider\u2019s hidden chain of thought in full, never replayed to the model), and actions (per-action outcome with marketableAtObservation and missedFill)."
           },
           "403": {
             "description": "Opponent metrics access denied."
@@ -737,6 +771,105 @@
         "responses": {
           "200": {
             "description": "text/markdown round log."
+          }
+        }
+      }
+    },
+    "/api/arena/modes": {
+      "get": {
+        "summary": "List available Atlas modes and associated defaults",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "defaultBotMode and modes"
+          }
+        }
+      }
+    },
+    "/api/arena/games/{id}/replace": {
+      "post": {
+        "summary": "Atomically replace your resting order; failed validation keeps the original",
+        "security": [
+          {
+            "arenaToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Arena result and current public state"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "409": {
+            "description": "Game has not started, ended, or is busy"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "side": {
+                    "type": "string",
+                    "enum": [
+                      "buy",
+                      "sell"
+                    ]
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "limit",
+                      "market"
+                    ],
+                    "default": "limit"
+                  },
+                  "quantity": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000,
+                    "description": "1\u201320 in market_relative, 1\u20131000 in hidden_center; reserved position capacity is also checked."
+                  },
+                  "price": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "multipleOf": 0.01,
+                    "description": "Limit/protective price in dollars; required for all market_relative orders, and all limit orders."
+                  },
+                  "requestId": {
+                    "type": "string",
+                    "maxLength": 100
+                  },
+                  "timeInForce": {
+                    "type": "string",
+                    "enum": [
+                      "GTC",
+                      "IOC"
+                    ]
+                  },
+                  "postOnly": {
+                    "type": "boolean"
+                  },
+                  "orderId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "orderId",
+                  "side",
+                  "quantity",
+                  "price"
+                ],
+                "additionalProperties": false
+              }
+            }
           }
         }
       }

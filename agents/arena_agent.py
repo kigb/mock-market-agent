@@ -128,9 +128,11 @@ class ArenaMCP:
 
     def _rest_tool(self, name: str, a: dict):
         if name == 'get_rules':
-            return self._rest('rules')
+            if a.get('gameId') and a.get('agentToken'):
+                return self._rest('games/'+a['gameId']+'/book', token=a['agentToken'])['result']['rules']
+            return self._rest('rules'+('?botMode='+a['botMode'] if a.get('botMode') else ''))
         if name == 'create_game':
-            body = {'seed': a.get('seed', 42), 'agents': []}
+            body = {'seed': a.get('seed', 42), 'agents': [], 'botMode': a.get('botMode', 'market_relative')}
             if a.get('durationSeconds') is not None:
                 body['durationSeconds'] = a['durationSeconds']
             return self._rest('games', 'POST', body)
@@ -144,7 +146,7 @@ class ArenaMCP:
             data = self._rest(game+'/book', token=token)
             o = data['result']
             if name == 'get_position':
-                data['result'] = {k: o[k] for k in ('position', 'openOrders')}
+                data['result'] = {k: o[k] for k in ('position', 'openOrders', 'riskCapacity')}
             elif name == 'get_atlas_history':
                 limit = int(a.get('limit') or 20)
                 ticks = (o.get('atlas') or {}).get('ticks') or []
@@ -157,7 +159,7 @@ class ArenaMCP:
             return self._rest(game+'/results', token=a.get('token'))
         if name == 'wait':
             return {'result': {'status': 'waiting'}}
-        routes = {'place_order': 'orders', 'cancel_order': 'cancel', 'cancel_all': 'cancel', 'record_decision': 'metrics'}
+        routes = {'place_order': 'orders', 'replace_order': 'replace', 'cancel_order': 'cancel', 'cancel_all': 'cancel', 'record_decision': 'metrics'}
         if name not in routes:
             raise MCPError('Unknown arena tool: ' + name)
         payload = {k: v for k, v in a.items() if k not in ('gameId', 'agentToken')}
@@ -224,7 +226,7 @@ class BaseAgent:
                         if i >= budget or ended:
                             results.append({'ok': False, 'error': 'Decision budget or game deadline reached; not executed.'})
                             continue
-                        if name in ('place_order', 'cancel_order', 'cancel_all'):
+                        if name in ('place_order', 'replace_order', 'cancel_order', 'cancel_all'):
                             item.setdefault('requestId', str(uuid.uuid4()))
                         try:
                             response = self.call(name, **item)
@@ -373,6 +375,32 @@ def market_reference(o: dict, own_quote: float) -> float:
         return (bid + ask) / 2
     return bid if bid is not None else ask if ask is not None else own_quote
 
+def safe_baseline_actions(o: dict, actions: list[dict]) -> list[dict]:
+    if (o.get('rules') or {}).get('botMode') != 'market_relative':
+        return actions
+    position = o['position']['position']
+    pending = {'buy': sum(x['quantity'] for x in o.get('openOrders', []) if x['side'] == 'buy'),
+               'sell': sum(x['quantity'] for x in o.get('openOrders', []) if x['side'] == 'sell')}
+    out = []
+    for original in actions:
+        a = dict(original)
+        if a.get('action') == 'cancel_all':
+            pending = {'buy': 0, 'sell': 0}
+        if a.get('action') == 'place_order':
+            side = a['side']
+            capacity = (20-position if side == 'buy' else 20+position) - pending[side]
+            a['quantity'] = min(a['quantity'], 20, capacity)
+            if a['quantity'] <= 0:
+                continue
+            if a.get('type') == 'market':
+                best = o['book']['bestAsk' if side == 'buy' else 'bestBid']
+                if best is None:
+                    continue
+                a['price'] = best
+            pending[side] += a['quantity']
+        out.append(a)
+    return out
+
 class MarketMakerAgent(BaseAgent):
     def decide(self, o: dict) -> list[dict]:
         reference = market_reference(o, self.opening_quote)
@@ -407,6 +435,13 @@ class MomentumAgent(BaseAgent):
         return [{'action': 'cancel_all'}, quote('buy', reference-.05, 3),
                 quote('sell', reference+.05, 3)]
 
+# Apply only to these rule strategies; provider-backed agents receive explicit server errors unchanged.
+for _baseline_class in (MarketMakerAgent, MeanReversionAgent, MomentumAgent):
+    _original_decide = _baseline_class.decide
+    def _bounded_decide(self, observation, _decide=_original_decide):
+        return safe_baseline_actions(observation, _decide(self, observation))
+    _baseline_class.decide = _bounded_decide
+
 class ModelAgent(BaseAgent):
     """A provider-backed agent that executes its chosen tools through real MCP.
 
@@ -435,7 +470,7 @@ class ModelAgent(BaseAgent):
         self.last_turn_time = 0
         # Other agents' ids -> other-N, assigned on first appearance and stable for the round.
         self.party_names: dict[str, str] = {}
-        names = {*READ_TOOLS, 'place_order', 'cancel_order', 'cancel_all', 'wait'}
+        names = {*READ_TOOLS, 'place_order', 'replace_order', 'cancel_order', 'cancel_all', 'wait'}
         self.model_tools = []
         for tool in self.mcp.tools():
             if tool['name'] not in names:
@@ -490,10 +525,10 @@ class ModelAgent(BaseAgent):
         headers = {'Content-Type': 'application/json', 'User-Agent': 'MarketArenaAgent/3.0'}
         if self.api_key:
             headers['Authorization'] = 'Bearer ' + self.api_key
-        system = ('Compete in this timed trading arena; the rules give durationSeconds and every snapshot gives remainingMs. Maximize final total P&L: cash plus inventory valued at C, the hidden Atlas center revealed at the end. '
-                  'Quotes cannot move C. Infer it from where Atlas trades; no opening price is supplied. '
+        system = ('Compete in this timed trading arena; the rules give durationSeconds and every snapshot gives remainingMs. Maximize final total P&L: cash plus inventory valued according to this game’s selected settlement rule. '
+                  'Market-relative mode has no hidden value and settles at trade VWAP; infer C only when hidden_center mode is explicitly selected. Obey reserved position capacity and use protected prices for taking. No opening price is supplied. '
                   'Your conversation from this round is retained; each turn you get only a short header (time left, last price, best bid/ask, position, P&L, open-order count, Atlas fills since your last turn) and pull details with get_order_book, get_atlas_history, get_fills or get_position. Read results are shown only within the current decision; later turns see a one-line reminder, so read again when you need current data. '
-                  'Begin every reply with one or two plain sentences saying what you see and why you act (they are logged), then call the tools in the same reply. Use at most four trading tools per decision. All prices are dollars. Supply quotes when needed. Read the public Atlas mechanism: random arrivals, limit price within C ± 5, quantity cap. Rules: '
+                  'Begin every reply with one or two plain sentences saying what you see and why you act (they are logged), then call the tools in the same reply. Use the provided tool contract and server action-rate bounds. All prices are dollars. Supply quotes when needed. Read the public Atlas mechanism: the exact arrival, price protection, quantity, and settlement rules for this game. Rules: '
                   + json.dumps(o.get('rules', self.rules)) + '\nStrategy: ' + self.prompt)
         replayed = [self.replay_overrides.get(i, m) if i < self.turn_start else m for i, m in enumerate(self.history)]
         payload = {'model': self.model, 'messages': [{'role': 'system', 'content': system}, *replayed],

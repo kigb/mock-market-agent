@@ -63,7 +63,8 @@ export async function reserveDefaultCall(now=Date.now()){
 
 // Settle every running game past its deadline without waiting for a client request. Idempotent: advance() finalizes once.
 export async function finalizeDue(now=Date.now(),limit=10){
- const due=await db().prepare('SELECT id FROM arena_games WHERE status=? AND ends_at<=? ORDER BY ends_at LIMIT ?').bind('running',now,Math.max(1,Math.min(50,Math.floor(limit)))).all<{id:string}>();
+ // Older games predate the indexed columns; read their stored deadline without a migration backfill.
+ const due=await db().prepare("SELECT id FROM (SELECT id,ends_at FROM arena_games WHERE status=? AND ends_at<=? UNION ALL SELECT id,json_extract(state,'$.endsAt') AS ends_at FROM arena_games WHERE status IS NULL AND json_extract(state,'$.status')=? AND json_extract(state,'$.endsAt')<=?) ORDER BY ends_at LIMIT ?").bind('running',now,'running',now,Math.max(1,Math.min(50,Math.floor(limit)))).all<{id:string}>();
  const finalized:string[]=[];
  for(const {id} of due.results){try{const r=await change(id,g=>g.status);if(r.state.status==='finished')finalized.push(id);}catch(error){console.error('Finalization sweep failed',{id,detail:error instanceof Error?error.message:'unknown'});}}
  return {checked:due.results.length,finalized};

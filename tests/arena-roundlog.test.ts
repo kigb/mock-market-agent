@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createGame,startGame,intent,advance,observation,publicState} from '../lib/arena/engine.ts';
+import {createGame as createArenaGame,startGame,intent,advance,observation,publicState} from '../lib/arena/engine.ts';
+// Pin these compatibility fixtures to the original hidden-center mode.
+const createGame=(...args:Parameters<typeof createArenaGame>)=>{args[7]??=180000;args[8]??='hidden_center';return createArenaGame(...args);};
 import {roundLog} from '../lib/arena/roundlog.ts';
 import type {DecisionEntry} from '../lib/arena/store.ts';
 const SECRET='00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff';

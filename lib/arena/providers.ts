@@ -1,4 +1,4 @@
-import {ArenaError,type Intent,type Agent, type Game,observation,orderBook} from './engine.ts';
+import {ArenaError,type Intent,type Agent, type Game,observation,orderBook,isRelative} from './engine.ts';
 import {normalizeCompletion,type ChatMessage} from './conversation.ts';
 import {MODEL_TOOLS,systemPrompt} from './protocol.ts';
 export const REASONING_EFFORTS=['none','low','medium','high'] as const;
@@ -50,22 +50,24 @@ async function requestCompletion(config:ModelConfig,messages:ChatMessage[],timeo
 export async function complete(config:ModelConfig,messages:ChatMessage[],timeoutMs:number,fetcher:typeof fetch=fetch,rules?:object){const {data,...meta}=await requestCompletion(config,messages,timeoutMs,fetcher,rules);return {...normalizeCompletion(data),...meta};}
 export async function infer(config:ModelConfig,observed:unknown,timeoutMs:number,fetcher:typeof fetch=fetch){const {data,...meta}=await requestCompletion(config,[{role:'user',content:JSON.stringify(observed)}],timeoutMs,fetcher);return {actions:parseDecision(data),...meta};}
 export function baseline(g:Game,a:Agent):Intent[]{
- const book=orderBook(g),quote=(side:'buy'|'sell',p:number,q=5):Intent=>({action:'place_order',type:'limit',side,quantity:q,price:Math.round(Math.max(0,Math.min(100,p))*100)/100});
+ const book=orderBook(g),quote=(side:'buy'|'sell',p:number,q=5):Intent=>({action:'place_order',type:'limit',side,quantity:isRelative(g)?Math.min(q,side==='buy'?20-a.position:20+a.position):q,price:Math.round(Math.max(0,Math.min(100,p))*100)/100});
  // An individual starter strategy chooses its own opening quote; the exchange supplies none.
  const hash=[...a.id].reduce((v,c)=>(Math.imul(v,31)+c.charCodeAt(0))>>>0,17);
  const ownOpening=(hash%10001)/100;
  const reference=g.lastPrice!==null?g.lastPrice/100:book.bestBid!==null&&book.bestAsk!==null?(book.bestBid+book.bestAsk)/2:book.bestBid??book.bestAsk??ownOpening;
  const actions:Intent[]=[{action:'cancel_all'}];
+ const safe=(actions:Intent[])=>actions.filter(i=>i.action!=='place_order'||i.quantity!>0);
+ const take=(side:'buy'|'sell',quantity:number):Intent=>({action:'place_order',side,type:'market',quantity:isRelative(g)?Math.min(quantity,side==='buy'?20-a.position:20+a.position):quantity,...(isRelative(g)?{price:side==='buy'?book.bestAsk!:book.bestBid!}:{})});
  if(a.strategy==='maker'){
-  const skew=Math.max(-.15,Math.min(.15,a.position*.002));return [...actions,quote('buy',reference-.04-skew),quote('sell',reference+.04-skew)];
+  const skew=Math.max(-.15,Math.min(.15,a.position*.002));return safe([...actions,quote('buy',reference-.04-skew),quote('sell',reference+.04-skew)]);
  }
  if(a.strategy==='mean_reversion'){
   const recent=g.fills.slice(-10),qty=recent.reduce((q,f)=>q+f.quantity,0),anchor=qty?recent.reduce((s,f)=>s+f.price*f.quantity,0)/qty/100:reference;
-  if(book.bestAsk!==null&&book.bestAsk<anchor)return [...actions,{action:'place_order',side:'buy',type:'market',quantity:3}];
-  if(book.bestBid!==null&&book.bestBid>anchor)return [...actions,{action:'place_order',side:'sell',type:'market',quantity:3}];
-  return [...actions,quote('buy',anchor-.02,3),quote('sell',anchor+.02,3)];
+  if(book.bestAsk!==null&&book.bestAsk<anchor)return safe([...actions,take('buy',3)]);
+  if(book.bestBid!==null&&book.bestBid>anchor)return safe([...actions,take('sell',3)]);
+  return safe([...actions,quote('buy',anchor-.02,3),quote('sell',anchor+.02,3)]);
  }
  const fills=g.fills.slice(-2),up=fills.length===2?fills[1].price>=fills[0].price:(Math.floor((g.botAt-g.startedAt!)/10000)%2===0);
- if((up&&book.bestAsk!==null)||(!up&&book.bestBid!==null))return [...actions,{action:'place_order',side:up?'buy':'sell',type:'market',quantity:2}];
- return [...actions,quote('buy',reference-.05,3),quote('sell',reference+.05,3)];
+ if((up&&book.bestAsk!==null)||(!up&&book.bestBid!==null))return safe([...actions,take(up?'buy':'sell',2)]);
+ return safe([...actions,quote('buy',reference-.05,3),quote('sell',reference+.05,3)]);
 }

@@ -1,7 +1,6 @@
 ALTER TABLE `arena_games` ADD `status` text;--> statement-breakpoint
 ALTER TABLE `arena_games` ADD `ends_at` integer;--> statement-breakpoint
 CREATE INDEX `arena_games_due` ON `arena_games` (`status`,`ends_at`);--> statement-breakpoint
-UPDATE `arena_games` SET `status`=json_extract(`state`,'$.status'), `ends_at`=json_extract(`state`,'$.endsAt');--> statement-breakpoint
 CREATE TABLE `arena_decisions` (
 	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
 	`game_id` text NOT NULL,

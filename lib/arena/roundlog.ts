@@ -46,12 +46,13 @@ export function roundLog({state,trajectories,decisions}:{state:State;trajectorie
  const rowsFor=(id:string)=>decisions.filter(d=>d.agentId===id);
  const out:string[]=[];
  const atlas:any=state.atlas;
- out.push(`# Round log · ${state.id}`,'',[`${state.durationMs/1000} s round`,`seed ${state.seed}`,`status ${state.status}`,atlas.center!=null?`hidden center C = ${money(atlas.center)}`:'center hidden until the close',atlas.commitment?`commitment ${String(atlas.commitment).slice(0,16)}…${atlas.secret?' (secret revealed, replay with agents/verify_atlas.py)':''}`:'',`${state.agents.length} agents`,`Atlas ${atlas.ticks.length} ${state.status==='finished'?'arrivals':'executions so far'} / ${atlas.filledQuantity} contracts filled`,`volume ${state.volume}`].filter(Boolean).join(' · '),'');
+ out.push(`# Round log · ${state.id}`,'',[`${state.durationMs/1000} s round`,`seed ${state.seed}`,`status ${state.status}`,state.botMode==='market_relative'?'Market-relative Atlas · no hidden value':atlas.center!=null?`hidden center C = ${money(atlas.center)}`:'center hidden until the close',atlas.commitment?`commitment ${String(atlas.commitment).slice(0,16)}…${atlas.secret?' (secret revealed, replay with agents/verify_atlas.py)':''}`:'',`${state.agents.length} agents`,`Atlas ${atlas.ticks.length} ${state.status==='finished'?'arrivals':'executions so far'} / ${atlas.filledQuantity} contracts filled`,`volume ${state.volume}`].filter(Boolean).join(' · '),'');
  // Leaderboard
  out.push('## Final leaderboard'+(state.status==='finished'?'':' (provisional)'),'','| # | Agent | Model · effort | P&L | Realized | Position | Filled | Fill rate | Calls | Errors | LLM mean | Staleness mean |','|---|---|---|---|---|---|---|---|---|---|---|---|');
  for(const a of state.leaderboard){const rows=rowsFor(a.id),llm=rows.map(r=>r.llmMs).filter((x):x is number=>typeof x==='number'),st=rows.map(r=>r.stalenessMs).filter((x):x is number=>typeof x==='number'),effort=rows.find(r=>r.reasoningEffort)?.reasoningEffort;
   out.push(`| ${a.rank} | ${cell(a.name)} | ${cell((a.model??a.strategy??a.provider)+(effort?' · '+effort:''))} | ${signed(a.pnl)} | ${signed(a.realizedPnl)} | ${a.position>0?'+':''}${a.position} | ${a.filledQuantity} | ${(a.fillRate*100).toFixed(0)}% | ${a.calls} | ${a.errors} | ${llm.length?mean(llm)+' ms':'—'} | ${st.length?mean(st)+' ms':'—'} |`);}
  out.push('');
+ if(state.settlement)out.push(`Settlement: ${state.settlement.source} = ${money(state.settlement.price)} · quality ${state.settlement.quality} · final-window volume ${state.settlement.windowVolume} in ${state.settlement.windowEvents} taker events · full-round VWAP ${money(state.settlement.fullRoundVwap)} · closing midpoint ${money(state.settlement.closingMidpoint)}`,'');
  // Observations across all transcripts, for market snapshots and P&L paths.
  const observations:{time:number;agentId:string;o:any}[]=[];
  // A user message is either a full observation (older rounds, external tools) or the compact header; normalise both.
@@ -70,7 +71,7 @@ export function roundLog({state,trajectories,decisions}:{state:State;trajectorie
  const events:Event[]=[],shown=new Set<string>(),hasTranscript=new Set<string>();
  for(const [i,k] of (atlas.ticks as any[]).entries()){
   const makers=[...new Set((k.executions||[]).map((x:any)=>names.get(x.maker)||x.maker))].join(', ');
-  const text=k.filledQuantity>0?`**Atlas** ${k.side==='buy'?'buys':'sells'} ${k.filledQuantity}${k.requestedQuantity?'/'+k.requestedQuantity:''} @ ${money(k.averageFillPrice)}${k.limitPrice!=null?' (limit '+money(k.limitPrice)+')':''} from ${makers||'the book'}`:`**Atlas** ${k.side} ${k.requestedQuantity??''} at limit ${money(k.limitPrice)}: no fill (best ${k.side==='buy'?'ask':'bid'} ${money(k.bestAvailablePrice)})`;
+  const text=k.filledQuantity>0?`**Atlas** ${k.side==='buy'?'buys':'sells'} ${k.filledQuantity}${k.requestedQuantity?'/'+k.requestedQuantity:''} @ ${money(k.averageFillPrice)}${k.limitPrice!=null?' (limit '+money(k.limitPrice)+')':''} from ${makers||'the book'}`:`**Atlas** ${k.side} ${k.requestedQuantity??''} at limit ${money(k.limitPrice)}: no fill${k.skipReason?' ('+k.skipReason+')':''} (best ${k.side==='buy'?'ask':'bid'} ${money(k.bestAvailablePrice)})`;
   events.push({time:k.time,order:i,lines:[`- ${rel(k.time)} · ${text}`]});
  }
  for(const t of trajectories){
