@@ -21,10 +21,13 @@ export function leanToolResult<T extends {ok:boolean;result?:any}>(entry:T):T{
 }
 export type ToolCall={id:string;type:'function';function:{name:string;arguments:string}};
 export type ChatMessage={role:'user'|'assistant'|'tool';content:string|null;tool_calls?:ToolCall[];tool_call_id?:string};
-export type Completion={message:ChatMessage;calls:{id:string;intent:Intent}[];latencyMs:number;usage:{promptTokens:number;completionTokens:number}};
+// reasoning is the provider's hidden chain of thought (reasoning_content). It is kept for analysis only: never replayed
+// to the model and never stored in the conversation.
+export type Completion={message:ChatMessage;calls:{id:string;intent:Intent}[];reasoning?:string;latencyMs:number;usage:{promptTokens:number;completionTokens:number}};
 export type TranscriptEntry={id:number;time:number;decisionId:string;step:number;message:ChatMessage};
-export function normalizeCompletion(data:any):Pick<Completion,'message'|'calls'>{
+export function normalizeCompletion(data:any):Pick<Completion,'message'|'calls'|'reasoning'>{
  const m=data?.choices?.[0]?.message;if(!m)throw new ArenaError('The provider returned no completion message.');
+ const hidden=[m.reasoning_content,m.reasoning,m.thinking].find(v=>typeof v==='string'&&v.trim());const reasoning=typeof hidden==='string'?hidden.trim().slice(0,100000):undefined;
  let toolCalls:ToolCall[]=[];
  if(Array.isArray(m.tool_calls)&&m.tool_calls.length){
   if(m.tool_calls.length>16)throw new ArenaError('The model returned too many tool calls.');
@@ -38,7 +41,7 @@ export function normalizeCompletion(data:any):Pick<Completion,'message'|'calls'>
   toolCalls=list.map((item:any)=>{const {action,name,...args}=item;return {id:'call_'+crypto.randomUUID(),type:'function',function:{name:action||name,arguments:JSON.stringify(args)}};});
  }else throw new ArenaError('The model produced no trading decision (possibly exhausted its token budget).');
  const calls=toolCalls.map(t=>{let args:any;try{args=JSON.parse(t.function.arguments);}catch{return {id:t.id,intent:{action:'invalid_tool_arguments'} as unknown as Intent};}if(!args||typeof args!=='object'||Array.isArray(args))return {id:t.id,intent:{action:'invalid_tool_arguments'} as unknown as Intent};return {id:t.id,intent:{...args,action:t.function.name} as Intent};});
- return {message:{role:'assistant',content:typeof m.content==='string'?m.content:null,...(toolCalls.length?{tool_calls:toolCalls}:{})},calls};
+ return {message:{role:'assistant',content:typeof m.content==='string'?m.content:null,...(toolCalls.length?{tool_calls:toolCalls}:{})},calls,...(reasoning?{reasoning}:{})};
 }
 export function scriptedCompletion(actions:Intent[]):Completion{return {...normalizeCompletion({choices:[{message:{content:JSON.stringify(actions)}}]}),latencyMs:0,usage:{promptTokens:0,completionTokens:0}};}
 export function redactMessage(message:ChatMessage,secrets:string[]):ChatMessage{function visit(value:any,key=''):any{if(typeof value==='string'){if(key==='role'||key==='type')return value;for(const secret of secrets)if(secret)value=value.replaceAll(secret,'[redacted]');return value;}if(Array.isArray(value))return value.map(v=>visit(v));if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).map(([k,v])=>[k,visit(v,k)]));return value;}return visit(message);}

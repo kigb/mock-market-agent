@@ -49,6 +49,8 @@ export const arenaDecisions = sqliteTable('arena_decisions', {
   actions: text('actions'),
   // Visible reasoning the model returned with its tool calls (website agents) or self-reported by external agents.
   note: text('note'),
+  // Hidden chain of thought (reasoning_content) kept in full for analysis; never replayed to the model.
+  reasoning: text('reasoning'),
   createdAt: integer('created_at').notNull(),
 }, table => [uniqueIndex('arena_decisions_receipt').on(table.gameId,table.agentId,table.decisionId,table.round),index('arena_decisions_agent').on(table.gameId,table.agentId,table.id)]);
 

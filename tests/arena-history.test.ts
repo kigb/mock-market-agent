@@ -44,8 +44,11 @@ test('long round histories retain the first message and all intermediate outcome
  assert.equal(received.messages.length,181);assert.equal(received.messages[1].content,'{"sequence":0}');assert.equal(received.messages.at(-1).content,'{"sequence":179}');assert.equal(done.calls.length,0);
 });
 test('tool IDs survive replay, duplicate IDs are repaired, and visible prose ends a turn',()=>{
- const parsed=normalizeCompletion({choices:[{message:{content:'Checking inventory.',reasoning_content:'Do not store hidden reasoning.',tool_calls:[tool('same','get_position',{}),tool('same','get_order_book',{})]}}]});
- assert.equal(parsed.calls[0].id,'same');assert.notEqual(parsed.calls[1].id,'same');assert.equal(parsed.message.tool_calls![1].id,parsed.calls[1].id);assert.ok(!JSON.stringify(parsed).includes('hidden reasoning'));
+ const parsed=normalizeCompletion({choices:[{message:{content:'Checking inventory.',reasoning_content:'  Hidden reasoning stays out of the replayed history.\n',tool_calls:[tool('same','get_position',{}),tool('same','get_order_book',{})]}}]});
+ assert.equal(parsed.calls[0].id,'same');assert.notEqual(parsed.calls[1].id,'same');assert.equal(parsed.message.tool_calls![1].id,parsed.calls[1].id);
+ // The hidden reasoning is captured for the analysis table but never enters the conversation message that is replayed.
+ assert.equal(parsed.reasoning,'Hidden reasoning stays out of the replayed history.');assert.ok(!JSON.stringify(parsed.message).includes('Hidden reasoning'));
+ assert.equal(normalizeCompletion({choices:[{message:{content:'Plain.',reasoning:'alt field'}}]}).reasoning,'alt field');assert.equal(normalizeCompletion({choices:[{message:{content:'Plain.',reasoning_content:'   '}}]}).reasoning,undefined);
  assert.equal(normalizeCompletion({choices:[{message:{content:'No additional action this turn.'}}]}).calls.length,0);
  const bad=normalizeCompletion({choices:[{message:{tool_calls:[{id:'invalid',function:{name:'place_order',arguments:'{broken'}}]}}]});assert.equal(bad.calls[0].id,'invalid');assert.equal(bad.calls[0].intent.action,'invalid_tool_arguments');
 });

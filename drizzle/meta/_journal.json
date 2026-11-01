@@ -43,6 +43,13 @@
       "when": 1793485568675,
       "tag": "0005_decision_note",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1793553088660,
+      "tag": "0006_decision_reasoning",
+      "breakpoints": true
     }
   ]
 }

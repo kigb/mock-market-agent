@@ -242,7 +242,8 @@ class BaseAgent:
                               round=turn, model=getattr(self, 'model', None),
                               reasoningEffort=getattr(self, 'reasoning_effort', None) or None,
                               actions=[summarize_action(a, r) for a, r in zip(actions, results)],
-                              note=(self.last_note or '')[:600] or None, requestId=str(uuid.uuid4()))
+                              note=(self.last_note or '')[:600] or None,
+                              reasoning=(getattr(self, 'last_reasoning', '') or '')[:100000] or None, requestId=str(uuid.uuid4()))
                     observation_time = execution_time or observation_time
                     budget -= min(budget, len(actions))
                     if not actions or budget == 0 or any(a['action'] not in ('get_rules', 'get_order_book', 'get_position') for a in actions):
@@ -474,6 +475,8 @@ class ModelAgent(BaseAgent):
             except (ValueError, TypeError):
                 actions.append({'action': 'invalid_tool_arguments'})
         self.last_note = message.get('content') if isinstance(message.get('content'), str) else ''
+        hidden = next((message.get(k) for k in ('reasoning_content', 'reasoning', 'thinking') if isinstance(message.get(k), str) and message.get(k).strip()), '')
+        self.last_reasoning = hidden.strip()[:100000]
         assistant = {'role': 'assistant', 'content': message.get('content')}
         if normalized:
             assistant['tool_calls'] = normalized

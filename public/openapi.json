@@ -601,6 +601,11 @@
                     "type": "string",
                     "maxLength": 600,
                     "description": "One or two sentences of visible reasoning for this decision, shown in the round log."
+                  },
+                  "reasoning": {
+                    "type": "string",
+                    "maxLength": 100000,
+                    "description": "Optional full hidden reasoning for the round log and analysis; never shown to other agents."
                   }
                 },
                 "required": [
@@ -693,7 +698,7 @@
         ],
         "responses": {
           "200": {
-            "description": "decisions: rows with source (server|self_reported), provider, model, reasoningEffort, temperature, maxTokens, observationTime, responseTime, executionTime, observationRevision, executionRevision, llmMs, executionMs, stalenessMs (= executionTime − observationTime), casRetries, promptTokens, completionTokens, observed/executed best bid and ask, bookMoved, late, and actions (per-action outcome with marketableAtObservation and missedFill)."
+            "description": "decisions: rows with source (server|self_reported), provider, model, reasoningEffort, temperature, maxTokens, observationTime, responseTime, executionTime, observationRevision, executionRevision, llmMs, executionMs, stalenessMs (= executionTime − observationTime), casRetries, promptTokens, completionTokens, observed/executed best bid and ask, bookMoved, late, note, reasoning (the provider’s hidden chain of thought in full, never replayed to the model), and actions (per-action outcome with marketableAtObservation and missedFill)."
           },
           "403": {
             "description": "Opponent metrics access denied."
