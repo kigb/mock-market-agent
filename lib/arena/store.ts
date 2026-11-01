@@ -1,5 +1,5 @@
 import {env} from 'cloudflare:workers';
-import {redactMessage,type ChatMessage,type TranscriptEntry} from './conversation.ts';
+import {redactMessage,replayView,type ChatMessage,type TranscriptEntry} from './conversation.ts';
 import {advance,ArenaError,type Game,type Agent,publicState} from './engine.ts';
 function db(){if(!env.DB)throw new ArenaError('Arena database is unavailable.',503);return env.DB;}
 export async function insertGame(g:Game){await db().prepare('INSERT INTO arena_games (id,state,version,created_at,status,ends_at) VALUES (?,?,0,?,?,?)').bind(g.id,JSON.stringify(g),g.createdAt,g.status,g.endsAt).run();}
@@ -9,7 +9,7 @@ export function authenticate(g:Game,token:string|null|undefined,hostOnly=false):
  throw new ArenaError(hostOnly?'A valid host token is required.':'A valid host or agent token is required.',401);
 }
 export function agentAuth(g:Game,token:string|null|undefined){const a=g.agents.find(a=>a.id!=='$atlas'&&!!token&&a.token===token);if(!a)throw new ArenaError('A valid agent token is required.',401);return a;}
-export type Journal=(agentId:string,decisionId:string,step:number,messages:ChatMessage[],secrets?:string[])=>void;
+export type Journal=(agentId:string,decisionId:string,step:number,messages:ChatMessage[],secrets?:string[],replays?:(ChatMessage|null)[])=>void;
 // One decision-metrics row: server-measured for website rounds, self-reported for external agents.
 export type DecisionRecord={agentId:string;decisionId:string;round:number;source:'server'|'self_reported';provider?:string|null;model?:string|null;reasoningEffort?:string|null;temperature?:number|null;maxTokens?:number|null;observationTime?:number|null;responseTime?:number|null;executionTime?:number|null;observationRevision?:number|null;executionRevision?:number|null;llmMs?:number|null;executionMs?:number|null;stalenessMs?:number|null;casRetries?:number|null;promptTokens?:number|null;completionTokens?:number|null;observedBestBid?:number|null;observedBestAsk?:number|null;executedBestBid?:number|null;executedBestAsk?:number|null;bookMoved?:boolean|null;late?:boolean|null;actions?:unknown;note?:string|null;reasoning?:string|null};
 export type Transaction={attempt:number;revision:number;record:(row:DecisionRecord)=>void};
@@ -25,8 +25,8 @@ export async function change<T>(id:string,fn:(g:Game,now:number,journal:Journal,
   const row=await db().prepare('SELECT state,version FROM arena_games WHERE id=?').bind(id).first<{state:string;version:number}>();
   if(!row)throw new ArenaError('Game not found.',404);
   const g=JSON.parse(row.state) as Game,now=clock();advance(g,now);
-  const pending:{agentId:string;decisionId:string;step:number;message:string}[]=[],decisions:DecisionRecord[]=[];
-  const journal:Journal=(agentId,decisionId,step,messages,secrets=[])=>{const a=g.agents.find(a=>a.id===agentId)!;if(!a)throw new ArenaError('Unknown history owner.');for(const [offset,message] of messages.entries())pending.push({agentId,decisionId,step:step+offset,message:JSON.stringify(redactMessage(message,[...secrets,g.hostToken,...g.agents.map(a=>a.token)]))});a.historyMessages=(a.historyMessages??0)+messages.length;};
+  const pending:{agentId:string;decisionId:string;step:number;message:string;replay:string|null}[]=[],decisions:DecisionRecord[]=[];
+  const journal:Journal=(agentId,decisionId,step,messages,secrets=[],replays=[])=>{const a=g.agents.find(a=>a.id===agentId)!;if(!a)throw new ArenaError('Unknown history owner.');const all=[...secrets,g.hostToken,...g.agents.map(a=>a.token)];for(const [offset,message] of messages.entries())pending.push({agentId,decisionId,step:step+offset,message:JSON.stringify(redactMessage(message,all)),replay:replays[offset]?JSON.stringify(redactMessage(replays[offset]!,all)):null});a.historyMessages=(a.historyMessages??0)+messages.length;};
   const tx:Transaction={attempt:i,revision:row.version+1,record:entry=>{decisions.push(entry);}};
   // Even a rejected late order must persist deadline finalization.
   let result!:T,error:unknown;try{result=await fn(g,now,journal,tx);}catch(e){error=e;}
@@ -43,8 +43,8 @@ export async function change<T>(id:string,fn:(g:Game,now:number,journal:Journal,
    const statements=[update];
    if(pending.length){
     // One transaction: losing the game CAS also suppresses every transcript row.
-    const rows=pending.map(()=> 'SELECT ? AS agent_id, ? AS decision_id, ? AS step, ? AS message').join(' UNION ALL ');
-    statements.push(db().prepare('INSERT INTO arena_messages (game_id,agent_id,decision_id,step,message,created_at) SELECT ?,entry.agent_id,entry.decision_id,entry.step,entry.message,? FROM ('+rows+') AS entry WHERE changes()=1 ON CONFLICT(game_id,agent_id,decision_id,step) DO NOTHING').bind(id,now,...pending.flatMap(p=>[p.agentId,p.decisionId,p.step,p.message])));
+    const rows=pending.map(()=> 'SELECT ? AS agent_id, ? AS decision_id, ? AS step, ? AS message, ? AS replay').join(' UNION ALL ');
+    statements.push(db().prepare('INSERT INTO arena_messages (game_id,agent_id,decision_id,step,message,replay,created_at) SELECT ?,entry.agent_id,entry.decision_id,entry.step,entry.message,entry.replay,? FROM ('+rows+') AS entry WHERE changes()=1 ON CONFLICT(game_id,agent_id,decision_id,step) DO NOTHING').bind(id,now,...pending.flatMap(p=>[p.agentId,p.decisionId,p.step,p.message,p.replay])));
    }
    for(const entry of decisions)statements.push(decisionInsert(id,entry,row.version+1,now));
    const write:D1Result=statements.length>1?(await db().batch(statements))[0]:await update.run();
@@ -69,7 +69,9 @@ export async function finalizeDue(now=Date.now(),limit=10){
  return {checked:due.results.length,finalized};
 }
 
-export async function transcript(id:string,agentId:string):Promise<TranscriptEntry[]>{const r=await db().prepare('SELECT id,created_at AS time,decision_id AS decisionId,step,message FROM arena_messages WHERE game_id=? AND agent_id=? ORDER BY id').bind(id,agentId).all<{id:number;time:number;decisionId:string;step:number;message:string}>();return r.results.map(row=>({...row,message:JSON.parse(row.message)}));}
+export async function transcript(id:string,agentId:string):Promise<TranscriptEntry[]>{const r=await db().prepare('SELECT id,created_at AS time,decision_id AS decisionId,step,message,replay FROM arena_messages WHERE game_id=? AND agent_id=? ORDER BY id').bind(id,agentId).all<{id:number;time:number;decisionId:string;step:number;message:string;replay:string|null}>();return r.results.map(row=>({...row,message:JSON.parse(row.message),replay:row.replay?JSON.parse(row.replay):null}));}
+// What the model is shown on its next turn: ephemeral read results are replaced by their one-line reminders.
+export async function replayMessages(id:string,agentId:string):Promise<ChatMessage[]>{return replayView(await transcript(id,agentId));}
 export async function gameTranscripts(id:string,allowedAgentIds:string[]){const result=[];for(const agentId of allowedAgentIds)result.push({agentId,messages:await transcript(id,agentId)});return result;}
 export type DecisionEntry=Omit<DecisionRecord,'bookMoved'|'late'|'actions'>&{id:number;createdAt:number;bookMoved:boolean|null;late:boolean|null;actions:unknown};
 export async function decisions(id:string,agentIds:string[]):Promise<DecisionEntry[]>{

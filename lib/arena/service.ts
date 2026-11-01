@@ -1,8 +1,8 @@
 import {env} from 'cloudflare:workers';
 import {defaultAgent,DEFAULT_MAX_TOKENS,DEFAULT_STRATEGY,presetCallLimit} from './presets.ts';
 import {addAgent,addEvent,ArenaError,callLimit,createGame,DURATION,durationOf,ensureRunning,intent,MIN_DECISION_GAP_MS,observation,orderBook,publicState,RULES,rulesFor,startGame,type AgentSpec,type Game,type Intent} from './engine.ts';
-import {agentAuth,authenticate,change,insertGame,reserveDefaultCall,transcript} from './store.ts';
-import {converse,leanSnapshot,leanToolResult,scriptedCompletion,type ChatMessage,type Completion} from './conversation.ts';
+import {agentAuth,authenticate,change,insertGame,replayMessages,reserveDefaultCall} from './store.ts';
+import {converse,headerSnapshot,labelParty,labelTicks,leanSnapshot,leanToolResult,READ_TOOLS,readSummary,scriptedCompletion,type ChatMessage,type Completion} from './conversation.ts';
 import {baseline,endpoint,complete,effectiveReasoningEffort,type ModelConfig} from './providers.ts';
 export async function makeGame(specs:AgentSpec[]=[],seed=42,owner='',durationMs:number=DURATION){const now=Date.now(),g=createGame('game_'+crypto.randomUUID(),crypto.randomUUID()+crypto.randomUUID(),owner,specs,now,seed,undefined,durationMs);await insertGame(g);return {state:publicState(g,now),revision:0,hostToken:g.hostToken,agentTokens:g.agents.filter(a=>a.id!=='$atlas').map(a=>({id:a.id,name:a.name,token:a.token}))};}
 export function runAction(g:Game,agentToken:string,input:any,now:number){
@@ -10,6 +10,9 @@ export function runAction(g:Game,agentToken:string,input:any,now:number){
  if(input.action==='get_rules')return rulesFor(g);
  if(input.action==='get_order_book')return observation(g,a,now);
  if(input.action==='get_position'){const o=observation(g,a,now);return {position:o.position,openOrders:o.openOrders};}
+ const limit=(fallback:number,max:number)=>Number.isInteger(input.limit)&&input.limit>=1?Math.min(input.limit,max):fallback;
+ if(input.action==='get_atlas_history'){const o=observation(g,a,now);return {total:o.atlas.ticks.length,ticks:labelTicks(o.atlas.ticks.slice(-limit(20,300)),a.id)};}
+ if(input.action==='get_fills'){return {fills:g.fills.slice(-limit(10,50)).reverse().map(f=>({time:f.time,side:f.side,price:f.price/100,quantity:f.quantity,taker:labelParty(f.taker,a.id),maker:labelParty(f.maker,a.id)}))};}
  return intent(g,a,input as Intent,now,input.requestId);
 }
 export async function callTool(name:string,args:any,owner=''){
@@ -36,7 +39,7 @@ export async function callTool(name:string,args:any,owner=''){
   tx.record({agentId:a.id,decisionId:args.requestId,round,source:'self_reported',provider:'external',model:args.model??a.model??null,reasoningEffort:args.reasoningEffort??null,observationTime,responseTime,executionTime,llmMs:Math.round(args.latencyMs),executionMs:responseTime!==null&&executionTime!==null?executionTime-responseTime:null,stalenessMs:observationTime!==null&&executionTime!==null?executionTime-observationTime:null,promptTokens:args.inputTokens??0,completionTokens:args.outputTokens??0,late:false,actions:args.actions??null,note:args.note??null,reasoning:args.reasoning??null});
   const result={recorded:true};g.receipts.push({agentId:a.id,id:args.requestId,result});g.receipts=g.receipts.slice(-500);return result;});
  if(name==='get_results')return change(args.gameId,(g)=>{authenticate(g,args.token);return {status:g.status};});
- if(!['get_order_book','get_position','place_order','cancel_order','cancel_all','wait'].includes(name))throw new ArenaError('Unknown MCP tool.',404);
+ if(!['get_order_book','get_position','get_atlas_history','get_fills','place_order','cancel_order','cancel_all','wait'].includes(name))throw new ArenaError('Unknown MCP tool.',404);
  return change(args.gameId,(g,now)=>runAction(g,args.agentToken,{...args,action:name},now));
 }
 type Book={bestBid:number|null;bestAsk:number|null};
@@ -68,9 +71,10 @@ export async function decision(id:string,token:string,config:ModelConfig|undefin
   if(a.preset&&a.calls>=presetCallLimit(durationOf(g)))throw new ArenaError('This arena-provided agent reached its model-call limit.',429);
   if(a.calls>=callLimit(g))throw new ArenaError(`This agent reached the ${callLimit(g)}-call game limit.`,429);
   if(a.leaseUntil>now||now-a.lastDecision<Math.max(a.intervalMs??0,MIN_DECISION_GAP_MS))return {skipped:true} as const;
-  a.leaseId=leaseId;a.leaseUntil=now+DECISION_LEASE_MS;a.lastDecision=now;
+  const previousTurn=a.lastDecision;a.leaseId=leaseId;a.leaseUntil=now+DECISION_LEASE_MS;a.lastDecision=now;
   const observed=observation(g,a,now);
-  journal(a.id,leaseId,0,[{role:'user',content:JSON.stringify(trimRules(observed))}],[config?.apiKey??'']);
+  // The model receives only the header; the full observation is available through the read tools.
+  journal(a.id,leaseId,0,[{role:'user',content:JSON.stringify(headerSnapshot(observed,previousTurn))}],[config?.apiKey??'']);
   return {skipped:false,agentId:a.id,preset:a.preset,endsAt:g.endsAt!,rules:rulesFor(g),book:{bestBid:observed.book.bestBid,bestAsk:observed.book.bestAsk} as Book,actions:a.provider==='baseline'?baseline(g,a):null};
  });
  if(claim.result.skipped)return {...claim,result:{skipped:true}};
@@ -88,7 +92,9 @@ export async function decision(id:string,token:string,config:ModelConfig|undefin
    const a=agentAuth(g,token),late=g.status!=='running'||a.leaseId!==leaseId,before=orderBook(g);
    const results=outcome.calls.map((call,i)=>{if(late)return {action:call.intent.action,ok:false,error:'Game deadline or decision lease passed; action was not executed.'};if(i>=budget)return {action:call.intent.action,ok:false,error:'The four-tool decision budget is exhausted; action was not executed.'};try{return {action:call.intent.action,ok:true,result:trimRules(runAction(g,token,{...call.intent,requestId:leaseId+':'+startStep+':'+i},now))};}catch(e){a.errors++;const error=e instanceof ArenaError?e.message:'Trading action failed.';addEvent(g,now,a.id,'error',error);return {action:call.intent.action,ok:false,error};}});
    const replies:ChatMessage[]=results.map((result,i)=>({role:'tool',tool_call_id:outcome.calls[i].id,content:JSON.stringify(leanToolResult(result))}));
-   journal(a.id,leaseId,startStep,[outcome.message,...replies],[config?.apiKey??'']);
+   // Read results are ephemeral: later turns replay a one-line reminder instead of the data.
+   const replays=results.map((result,i)=>READ_TOOLS.has(outcome.calls[i].intent.action)&&result.ok?{role:'tool' as const,tool_call_id:outcome.calls[i].id,content:JSON.stringify(readSummary(outcome.calls[i].intent.action,result.result))}:null);
+   journal(a.id,leaseId,startStep,[outcome.message,...replies],[config?.apiKey??''],[null,...replays]);
    if(!late){a.latencySamples=(a.latencySamples??0)+1;a.latencyMs+=outcome.latencyMs;a.promptTokens+=outcome.usage.promptTokens;a.completionTokens+=outcome.usage.completionTokens;addEvent(g,now,a.id,'decision',`${a.name} · ${outcome.calls.length} tool calls · ${outcome.latencyMs} ms · history retained`);}
    const responded=respondedAt||now;
    tx.record({agentId:a.id,decisionId:leaseId,round,source:'server',provider:a.provider,model:a.model??null,reasoningEffort:effectiveReasoningEffort(config),temperature:config?config.temperature??.3:null,maxTokens:config?config.maxTokens??512:null,observationTime:inputTime,responseTime:config?responded:null,executionTime:now,observationRevision:inputRevision,executionRevision:tx.revision,llmMs:config?outcome.latencyMs:null,executionMs:config?now-responded:null,stalenessMs:now-inputTime,casRetries:tx.attempt,promptTokens:outcome.usage.promptTokens,completionTokens:outcome.usage.completionTokens,observedBestBid:inputBook.bestBid,observedBestAsk:inputBook.bestAsk,executedBestBid:before.bestBid,executedBestAsk:before.bestAsk,bookMoved:inputBook.bestBid!==before.bestBid||inputBook.bestAsk!==before.bestAsk,late,actions:outcome.calls.map((call,i)=>summarizeAction(call.intent,results[i],inputBook)),note:config&&typeof outcome.message.content==='string'?outcome.message.content:null,reasoning:outcome.reasoning??null});
@@ -102,7 +108,7 @@ export async function decision(id:string,token:string,config:ModelConfig|undefin
   if(claim.result.preset){const p=defaultAgent(claim.result.preset);if(!p||!env.SAIL_API_KEY)throw new ArenaError('The arena’s default Sail agents are unavailable. Add an agent with your own provider key.',503);config={provider:'sail',model:p.model,apiKey:env.SAIL_API_KEY,temperature:.3,maxTokens:p.maxTokens??DEFAULT_MAX_TOKENS,prompt:DEFAULT_STRATEGY,reasoningEffort:p.reasoningEffort};}
   if(claim.result.actions){if(await beforeCall())await commit(scriptedCompletion(claim.result.actions),4);}
   else{
-   const messages=(await transcript(id,agentId)).map(e=>e.message);
+   const messages=await replayMessages(id,agentId);
    const rules=claim.result.rules;
    await converse({messages,deadline,beforeCall,complete:async(history,remaining)=>{inferenceStarted=Date.now();const outcome=await complete(config!,history,remaining,undefined,rules);respondedAt=Date.now();return outcome;},commit});
   }

@@ -25,7 +25,23 @@ export type ChatMessage={role:'user'|'assistant'|'tool';content:string|null;tool
 // reasoning is the provider's hidden chain of thought (reasoning_content). It is kept for analysis only: never replayed
 // to the model and never stored in the conversation.
 export type Completion={message:ChatMessage;calls:{id:string;intent:Intent}[];reasoning?:string;latencyMs:number;usage:{promptTokens:number;completionTokens:number}};
-export type TranscriptEntry={id:number;time:number;decisionId:string;step:number;message:ChatMessage};
+// replay: when set, this is what the model sees on later turns instead of the stored message (ephemeral read results).
+export type TranscriptEntry={id:number;time:number;decisionId:string;step:number;message:ChatMessage;replay?:ChatMessage|null};
+export const READ_TOOLS=new Set(['get_rules','get_order_book','get_position','get_atlas_history','get_fills']);
+export const labelParty=(id:unknown,me:unknown)=>id==='$atlas'?'Atlas':id===me?'you':'other';
+export const labelTicks=(ticks:any[],me:unknown)=>ticks.map(t=>Array.isArray(t.executions)?{...t,executions:t.executions.map((x:any)=>({...x,maker:labelParty(x.maker,me)}))}:t);
+// The per-turn header: the minimum every decision needs. Everything else is pulled through the read tools.
+export function headerSnapshot(o:any,sinceTime:number){
+ const ticks:any[]=Array.isArray(o?.atlas?.ticks)?o.atlas.ticks:[],filled=ticks.filter(t=>t.filledQuantity>0);
+ return {serverTime:o.serverTime,remainingMs:o.remainingMs,lastPrice:o.lastPrice??null,bestBid:o.book?.bestBid??null,bestAsk:o.book?.bestAsk??null,position:o.position?.position??0,pnl:o.position?.pnl??0,openOrders:Array.isArray(o.openOrders)?o.openOrders.length:0,atlasFillsSinceLastTurn:filled.filter(t=>t.time>sinceTime).length,atlasFillsTotal:filled.length};
+}
+// One-line stand-in for a read result on later turns; the full result stays in the transcript for logs and exports.
+export function readSummary(action:string,result:any){
+ const n=(v:unknown)=>Array.isArray(v)?v.length:0;
+ const text=action==='get_order_book'?`Viewed the order book (${n(result?.book?.bids)+n(result?.book?.asks)} levels), your ${n(result?.openOrders)} open orders, position, recent fills and ${n(result?.atlas?.ticks)} Atlas executions`:action==='get_atlas_history'?`Viewed ${n(result?.ticks)} Atlas executions`:action==='get_fills'?`Viewed ${n(result?.fills)} recent fills`:action==='get_position'?`Viewed your position and ${n(result?.openOrders)} open orders`:'Viewed the rules';
+ return {ephemeral:true,note:text+' on that turn; call the tool again for current data.'};
+}
+export function replayView(entries:TranscriptEntry[]):ChatMessage[]{return entries.map(e=>e.replay??e.message);}
 export function normalizeCompletion(data:any):Pick<Completion,'message'|'calls'|'reasoning'>{
  const m=data?.choices?.[0]?.message;if(!m)throw new ArenaError('The provider returned no completion message.');
  const hidden=[m.reasoning_content,m.reasoning,m.thinking].find(v=>typeof v==='string'&&v.trim());const reasoning=typeof hidden==='string'?hidden.trim().slice(0,100000):undefined;
@@ -49,13 +65,13 @@ export function redactMessage(message:ChatMessage,secrets:string[]):ChatMessage{
 // Keep every prior message. A read-only tool turn may immediately lead to a trading turn.
 export async function converse(options:{messages:ChatMessage[];deadline:number;now?:()=>number;beforeCall:(round:number)=>Promise<boolean>;complete:(messages:ChatMessage[],remainingMs:number)=>Promise<Completion>;commit:(completion:Completion,budget:number,round:number)=>Promise<{replies:ChatMessage[];late?:boolean}>}){
  const now=options.now??Date.now,messages=[...options.messages];let used=0,rounds=0,late=false;
- for(let round=0;round<2&&now()<options.deadline;round++){
+ for(let round=0;round<3&&now()<options.deadline;round++){
   if(!await options.beforeCall(round))break;
   const remaining=options.deadline-now();if(remaining<=0)break;
   const completion=await options.complete(messages,remaining),result=await options.commit(completion,4-used,round);
   rounds++;messages.push(completion.message,...result.replies);late=!!result.late;
   used+=Math.min(completion.calls.length,4-used);
-  if(late||!completion.calls.length||used>=4||completion.calls.some(c=>!['get_rules','get_order_book','get_position'].includes(c.intent.action)))break;
+  if(late||!completion.calls.length||used>=4||completion.calls.some(c=>!READ_TOOLS.has(c.intent.action)))break;
  }
  return {rounds,used,late};
 }

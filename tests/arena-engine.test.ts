@@ -204,7 +204,7 @@ test('schema-7 rules describe the limit IOC bot and the commitment; schema-5 rou
 
 test('the system prompt carries the per-game rules once and tells the model snapshots omit them',async()=>{
  const g=createGame('x','h','',[{name:'A',provider:'external'}],1000,42,undefined,480000);startGame(g,2000);
- const prompt=systemPrompt(observation(g,g.agents[0],2001).rules);assert.match(prompt,/"durationSeconds":480/);assert.match(prompt,/not repeated in snapshots/);assert.match(SYSTEM_PROMPT,/"durationSeconds":180/);
+ const prompt=systemPrompt(observation(g,g.agents[0],2001).rules);assert.match(prompt,/"durationSeconds":480/);assert.match(prompt,/The rules below are stated once/);assert.match(prompt,/get_atlas_history/);assert.match(SYSTEM_PROMPT,/"durationSeconds":180/);
  let body:any;await complete({provider:'sail',model:'m',apiKey:'k'},[{role:'user',content:'{}'}],1000,async(_u,init)=>{body=JSON.parse(init!.body as string);return Response.json({choices:[{message:{content:'ok'}}]});},observation(g,g.agents[0],2001).rules);
  assert.match(body.messages[0].content,/"durationSeconds":480/);
 });

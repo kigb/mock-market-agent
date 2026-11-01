@@ -19,7 +19,7 @@ Atlas arrives at random times (on average every 2 seconds) and buys or sells 1â€
 
 Choose a provider endpoint whose context window can fit the full round. Sailâ€™s Gemma 12B endpoint is limited to 16K; the website defaults use larger-context models. Context-limit errors preserve the transcript and are reported explicitly.
 
-Model-backed Python agents also retain every observation, assistant tool call, and actual tool result throughout the round. Read-only calls can receive an immediate follow-up, and later decisions replay the full conversation. The local results JSON includes timestamped `trajectories`. Provider keys and agent tokens are redacted.
+Model-backed Python agents receive a compact header each turn (time left, last price, best bid/ask, position, P&L, open-order count, Atlas fills since the last turn) and pull details with the read tools; read results are ephemeral and are replayed on later turns as a one-line reminder, while every assistant tool call and order result is retained in full. Read-only calls can receive an immediate follow-up, and later decisions replay the full conversation. The local results JSON includes timestamped `trajectories`. Provider keys and agent tokens are redacted.
 
 ## Model-backed agent
 
@@ -67,7 +67,7 @@ Create an API lobby on the website, choose External / MCP for your agent, copy i
 
 - `get_rules`
 - `create_game`, `register_agent`, `start_game`
-- `get_order_book`, `get_position`
+- `get_order_book`, `get_position`, `get_atlas_history`, `get_fills`
 - `place_order`, `cancel_order`, `cancel_all`, `wait`
 - `get_results`
 - `record_decision` (optional external telemetry; the starter reports latency, token usage, model, reasoning effort, a one-line `note` of visible reasoning, and the observation/response/execution timestamps automatically, so the arena can compute observation staleness per decision and show the agent in the round log; see the main README's Decision metrics and Round log sections)

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {complete} from '../lib/arena/providers.ts';
-import {converse,leanSnapshot,leanToolResult,normalizeCompletion,redactMessage,type ChatMessage,type Completion} from '../lib/arena/conversation.ts';
+import {converse,headerSnapshot,leanSnapshot,leanToolResult,normalizeCompletion,READ_TOOLS,readSummary,redactMessage,replayView,type ChatMessage,type Completion,type TranscriptEntry} from '../lib/arena/conversation.ts';
 import {createGame,startGame,intent,observation} from '../lib/arena/engine.ts';
 const config={provider:'sail' as const,model:'fixture',apiKey:'TEST_PROVIDER_SECRET'};
 const tool=(id:string,name:string,args:object)=>({id,type:'function',function:{name,arguments:JSON.stringify(args)}});
@@ -38,6 +38,19 @@ test('model snapshots drop the rules and slim the account, orders, and fills whi
  assert.deepEqual(leanToolResult({action:'place_order',ok:true,result:{orderId:'ord_1',filledQuantity:0,remainingQuantity:0,canceledQuantity:4,averageFillPrice:null,status:'unfilled'}}).result,{orderId:'ord_1',status:'unfilled',filled:0});
  assert.deepEqual(leanToolResult({action:'cancel_all',ok:true,result:{status:'canceled',canceled:2}}).result,{status:'canceled',canceled:2});assert.deepEqual(leanToolResult({action:'wait',ok:false,error:'late'}),{action:'wait',ok:false,error:'late'});
  assert.ok(!('rules' in leanToolResult({action:'get_order_book',ok:true,result:full}).result));
+});
+test('the per-turn header is minimal, read results are ephemeral on replay, and decisions allow three rounds',async()=>{
+ const g=createGame('game_header','host','',[{name:'A',provider:'external'},{name:'B',provider:'external'}],1000);startGame(g,2000);
+ intent(g,g.agents[1],{action:'place_order',side:'sell',type:'limit',quantity:3,price:40},2001);intent(g,g.agents[0],{action:'place_order',side:'buy',type:'limit',quantity:2,price:39},2002);
+ const o:any=observation(g,g.agents[0],5000);o.atlas.ticks=[{time:3000,side:'buy',filledQuantity:2,averageFillPrice:40,executions:[]},{time:4500,side:'sell',filledQuantity:1,averageFillPrice:39,executions:[]}];
+ const h=headerSnapshot(o,3500);assert.deepEqual(h,{serverTime:5000,remainingMs:177000,lastPrice:null,bestBid:39,bestAsk:40,position:0,pnl:0,openOrders:1,atlasFillsSinceLastTurn:1,atlasFillsTotal:2});assert.ok(JSON.stringify(h).length<220);
+ assert.deepEqual([...READ_TOOLS].sort(),['get_atlas_history','get_fills','get_order_book','get_position','get_rules']);
+ const summary=readSummary('get_atlas_history',{total:40,ticks:[{},{},{}]});assert.equal(summary.ephemeral,true);assert.match(summary.note,/Viewed 3 Atlas executions/);assert.match(readSummary('get_order_book',leanSnapshot(o)).note,/order book \(2 levels\), your 1 open orders/);
+ const entries:TranscriptEntry[]=[{id:1,time:1,decisionId:'d',step:0,message:{role:'user',content:'{}'}},{id:2,time:2,decisionId:'d',step:1,message:{role:'assistant',content:null,tool_calls:[tool('r','get_fills',{}) as any]}},{id:3,time:3,decisionId:'d',step:2,message:{role:'tool',tool_call_id:'r',content:'{"fills":[1,2,3]}'},replay:{role:'tool',tool_call_id:'r',content:'{"ephemeral":true}'}},{id:4,time:4,decisionId:'d',step:3,message:{role:'tool',tool_call_id:'x',content:'{"orderId":"ord_1"}'},replay:null}];
+ const replayed=replayView(entries);assert.equal(replayed[2].content,'{"ephemeral":true}');assert.equal(replayed[2].tool_call_id,'r','tool linkage survives');assert.equal(replayed[3].content,'{"orderId":"ord_1"}');assert.equal(entries[2].message.content,'{"fills":[1,2,3]}','the transcript keeps the data');
+ let calls=0;const reads=():Completion=>({...normalizeCompletion({choices:[{message:{tool_calls:[tool('r'+calls,'get_atlas_history',{})]}}]}),latencyMs:0,usage:{promptTokens:0,completionTokens:0}});
+ await converse({messages:[],deadline:100,now:()=>0,beforeCall:async()=>true,complete:async()=>{calls++;return reads();},commit:async(c)=>({replies:c.calls.map(x=>({role:'tool',tool_call_id:x.id,content:'{}'}))})});
+ assert.equal(calls,3,'three rounds when every round is a read');
 });
 test('long round histories retain the first message and all intermediate outcomes',async()=>{
  const messages:ChatMessage[]=Array.from({length:180},(_,i)=>({role:'user',content:JSON.stringify({sequence:i})}));let received:any;

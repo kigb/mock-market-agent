@@ -66,5 +66,7 @@ export const arenaMessages = sqliteTable('arena_messages', {
   decisionId: text('decision_id').notNull(),
   step: integer('step').notNull(),
   message: text('message').notNull(),
+  // For ephemeral read results: the one-line reminder replayed to the model on later turns instead of `message`.
+  replay: text('replay'),
   createdAt: integer('created_at').notNull(),
 }, table => [uniqueIndex('arena_messages_receipt').on(table.gameId,table.agentId,table.decisionId,table.step),index('arena_messages_agent').on(table.gameId,table.agentId,table.id)]);

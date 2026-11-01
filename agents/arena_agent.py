@@ -140,10 +140,19 @@ class ArenaMCP:
             return self._rest(game+'/agents', 'POST', {'name': a['name']}, a.get('hostToken'))
         if name == 'start_game':
             return self._rest(game+'/start', 'POST', {}, a.get('hostToken'))
-        if name in ('get_order_book', 'get_position'):
+        if name in ('get_order_book', 'get_position', 'get_atlas_history', 'get_fills'):
             data = self._rest(game+'/book', token=token)
+            o = data['result']
+            me = (o.get('position') or {}).get('id')
             if name == 'get_position':
-                data['result'] = {k: data['result'][k] for k in ('position', 'openOrders')}
+                data['result'] = {k: o[k] for k in ('position', 'openOrders')}
+            elif name == 'get_atlas_history':
+                limit = int(a.get('limit') or 20)
+                ticks = (o.get('atlas') or {}).get('ticks') or []
+                data['result'] = {'total': len(ticks), 'ticks': [{**t, 'executions': [{**x, 'maker': label_party(x.get('maker'), me)} for x in t.get('executions', [])]} for t in ticks[-limit:]]}
+            elif name == 'get_fills':
+                limit = int(a.get('limit') or 10)
+                data['result'] = {'fills': [{'time': f.get('time'), 'side': f.get('side'), 'price': f.get('price'), 'quantity': f.get('quantity'), 'taker': label_party(f.get('taker'), me), 'maker': label_party(f.get('maker'), me)} for f in (o.get('recentFills') or [])[:limit]]}
             return data
         if name == 'get_results':
             return self._rest(game+'/results', token=a.get('token'))
@@ -202,7 +211,7 @@ class BaseAgent:
                 # Server-clock stamp of the snapshot this decision acts on. A follow-up turn acts on the
                 # previous turn's tool results, so its observation time is that turn's execution time.
                 observation_time = observed.get('serverTime')
-                for turn in range(2):
+                for turn in range(3):
                     if time.monotonic() >= self.turn_deadline:
                         break
                     inference_started = time.monotonic()
@@ -246,7 +255,7 @@ class BaseAgent:
                               reasoning=(getattr(self, 'last_reasoning', '') or '')[:100000] or None, requestId=str(uuid.uuid4()))
                     observation_time = execution_time or observation_time
                     budget -= min(budget, len(actions))
-                    if not actions or budget == 0 or any(a['action'] not in ('get_rules', 'get_order_book', 'get_position') for a in actions):
+                    if not actions or budget == 0 or any(a['action'] not in READ_TOOLS for a in actions):
                         break
             except (MCPError, ValueError) as exc:
                 self.error_notice(str(exc))
@@ -258,6 +267,36 @@ class BaseAgent:
                     print(f'{type(self).__name__}: stopped after five errors.')
                     return
             time.sleep(max(.25, self.interval - (time.monotonic() - started)))
+
+READ_TOOLS = ('get_rules', 'get_order_book', 'get_position', 'get_atlas_history', 'get_fills')
+
+def label_party(ident, me):
+    return 'Atlas' if ident == '$atlas' else 'you' if ident == me else 'other'
+
+def header_snapshot(o: dict, since_time: float) -> dict:
+    """The per-turn header: the minimum every decision needs; details are pulled through the read tools."""
+    ticks = [t for t in ((o.get('atlas') or {}).get('ticks') or []) if t.get('filledQuantity')]
+    return {'serverTime': o.get('serverTime'), 'remainingMs': o.get('remainingMs'), 'lastPrice': o.get('lastPrice'),
+            'bestBid': (o.get('book') or {}).get('bestBid'), 'bestAsk': (o.get('book') or {}).get('bestAsk'),
+            'position': (o.get('position') or {}).get('position', 0), 'pnl': (o.get('position') or {}).get('pnl', 0),
+            'openOrders': len(o.get('openOrders') or []),
+            'atlasFillsSinceLastTurn': sum(1 for t in ticks if (t.get('time') or 0) > since_time), 'atlasFillsTotal': len(ticks)}
+
+def read_summary(action: str, result) -> dict:
+    """One-line stand-in replayed on later turns instead of a read result."""
+    n = lambda v: len(v) if isinstance(v, list) else 0
+    r = result if isinstance(result, dict) else {}
+    if action == 'get_order_book':
+        text = f"Viewed the order book ({n((r.get('book') or {}).get('bids')) + n((r.get('book') or {}).get('asks'))} levels), your {n(r.get('openOrders'))} open orders, position, recent fills and {n((r.get('atlas') or {}).get('ticks'))} Atlas executions"
+    elif action == 'get_atlas_history':
+        text = f"Viewed {n(r.get('ticks'))} Atlas executions"
+    elif action == 'get_fills':
+        text = f"Viewed {n(r.get('fills'))} recent fills"
+    elif action == 'get_position':
+        text = f"Viewed your position and {n(r.get('openOrders'))} open orders"
+    else:
+        text = 'Viewed the rules'
+    return {'ephemeral': True, 'note': text + ' on that turn; call the tool again for current data.'}
 
 def lean_snapshot(value):
     """Model-facing view of an observation (or a tool result wrapping one): no static rules, the trading view of the
@@ -370,7 +409,11 @@ class ModelAgent(BaseAgent):
         self.history: list[dict] = []
         self.trajectory: list[dict] = []
         self.pending_calls: list[dict] = []
-        names = {'get_rules', 'get_order_book', 'get_position', 'place_order', 'cancel_order', 'cancel_all', 'wait'}
+        # Ephemeral reads: index in history -> one-line reminder replayed on later turns instead of the data.
+        self.replay_overrides: dict[int, dict] = {}
+        self.turn_start = 0
+        self.last_turn_time = 0
+        names = {*READ_TOOLS, 'place_order', 'cancel_order', 'cancel_all', 'wait'}
         self.model_tools = []
         for tool in self.mcp.tools():
             if tool['name'] not in names:
@@ -405,6 +448,9 @@ class ModelAgent(BaseAgent):
     def feedback(self, actions: list[dict], results: list[dict]) -> None:
         for call, result in zip(self.pending_calls, results):
             self.remember({'role': 'tool', 'tool_call_id': call['id'], 'content': json.dumps(lean_snapshot(result))})
+            name = call['function']['name']
+            if name in READ_TOOLS and result.get('ok'):
+                self.replay_overrides[len(self.history) - 1] = {'role': 'tool', 'tool_call_id': call['id'], 'content': json.dumps(read_summary(name, result.get('result')))}
         self.pending_calls = []
 
     def decide(self, o: dict) -> list[dict]:
@@ -415,17 +461,20 @@ class ModelAgent(BaseAgent):
 
     def infer(self, o: dict, fresh: bool) -> list[dict]:
         if fresh:
-            # The static rules go into the system prompt once; dropping them from each snapshot roughly halves history growth.
-            self.remember({'role': 'user', 'content': json.dumps(lean_snapshot(o))})
+            # Only the compact header enters history; the model pulls details with the read tools.
+            self.turn_start = len(self.history)
+            self.remember({'role': 'user', 'content': json.dumps(header_snapshot(o, self.last_turn_time))})
+            self.last_turn_time = o.get('serverTime') or self.last_turn_time
         headers = {'Content-Type': 'application/json', 'User-Agent': 'MarketArenaAgent/3.0'}
         if self.api_key:
             headers['Authorization'] = 'Bearer ' + self.api_key
         system = ('Compete in this timed trading arena; the rules give durationSeconds and every snapshot gives remainingMs. Maximize final total P&L: cash plus inventory valued at C, the hidden Atlas center revealed at the end. '
                   'Quotes cannot move C. Infer it from where Atlas trades; no opening price is supplied. '
-                  'Your entire conversation from this round is retained. Use earlier actions and their tool results to adapt. The latest snapshot includes your current orders and position. '
+                  'Your conversation from this round is retained; each turn you get only a short header (time left, last price, best bid/ask, position, P&L, open-order count, Atlas fills since your last turn) and pull details with get_order_book, get_atlas_history, get_fills or get_position. Read results are shown only within the current decision; later turns see a one-line reminder, so read again when you need current data. '
                   'Begin every reply with one or two plain sentences saying what you see and why you act (they are logged), then call the tools in the same reply. Use at most four trading tools per decision. All prices are dollars. Supply quotes when needed. Read the public Atlas mechanism: random arrivals, limit price within C ± 5, quantity cap. Rules: '
                   + json.dumps(o.get('rules', self.rules)) + '\nStrategy: ' + self.prompt)
-        payload = {'model': self.model, 'messages': [{'role': 'system', 'content': system}, *self.history],
+        replayed = [self.replay_overrides.get(i, m) if i < self.turn_start else m for i, m in enumerate(self.history)]
+        payload = {'model': self.model, 'messages': [{'role': 'system', 'content': system}, *replayed],
                    'tools': self.model_tools, 'tool_choice': 'auto', 'temperature': self.temperature, 'stream': False}
         payload['max_completion_tokens' if self.provider == 'sail' else 'max_tokens'] = self.max_tokens
         if self.reasoning_effort:

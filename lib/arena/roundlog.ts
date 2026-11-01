@@ -28,7 +28,9 @@ function describeOutcome(r:any){
  const x=r.result;if(!x||typeof x!=='object')return '✓';
  if('filledQuantity' in x||'filled' in x){const filled=x.filledQuantity??x.filled,resting=x.remainingQuantity??x.resting,parts=[String(x.status??'')];if(filled)parts.push(`filled ${filled}${x.averageFillPrice!=null?' @ '+money(x.averageFillPrice):''}`);if(resting)parts.push(`${resting} resting`);if(x.canceledQuantity)parts.push(`${x.canceledQuantity} canceled`);return '✓ '+parts.filter(Boolean).join(', ');}
  if('canceled' in x)return `✓ canceled ${x.canceled}`;
- if(x.book)return '✓ market snapshot';
+ if(Array.isArray(x.ticks))return `✓ read ${x.ticks.length} Atlas executions${x.total!=null?' of '+x.total:''}`;
+ if(Array.isArray(x.fills))return `✓ read ${x.fills.length} fills`;
+ if(x.book)return `✓ read the full snapshot (${(x.book.bids?.length||0)+(x.book.asks?.length||0)} levels, ${Array.isArray(x.atlas?.ticks)?x.atlas.ticks.length:0} Atlas executions)`;
  if(x.position&&!x.book)return '✓ position read';
  return '✓ '+clip(x.status??'done',40);
 }
@@ -52,7 +54,9 @@ export function roundLog({state,trajectories,decisions}:{state:State;trajectorie
  out.push('');
  // Observations across all transcripts, for market snapshots and P&L paths.
  const observations:{time:number;agentId:string;o:any}[]=[];
- for(const t of trajectories)for(const e of t.messages){if(e.message.role!=='user')continue;const o=parse(e.message.content);if(o&&o.book&&typeof o.serverTime==='number')observations.push({time:o.serverTime,agentId:t.agentId,o});}
+ // A user message is either a full observation (older rounds, external tools) or the compact header; normalise both.
+ const asView=(o:any)=>o&&typeof o.serverTime==='number'?(o.book?o:('bestBid' in o&&'remainingMs' in o?{serverTime:o.serverTime,remainingMs:o.remainingMs,lastPrice:o.lastPrice,book:{bestBid:o.bestBid,bestAsk:o.bestAsk,spread:o.bestBid!=null&&o.bestAsk!=null?Math.round((o.bestAsk-o.bestBid)*100)/100:null},position:{position:o.position,pnl:o.pnl},openOrders:{length:o.openOrders},atlasSince:o.atlasFillsSinceLastTurn}:null)):null;
+ for(const t of trajectories)for(const e of t.messages){if(e.message.role!=='user')continue;const o=asView(parse(e.message.content));if(o)observations.push({time:o.serverTime,agentId:t.agentId,o});}
  observations.sort((a,b)=>a.time-b.time);
  // Market timeline in a dozen buckets.
  const duration=state.durationMs,bucket=Math.max(5000,Math.round(duration/12/5000)*5000),end=state.endsAt??start+duration;
@@ -74,13 +78,13 @@ export function roundLog({state,trajectories,decisions}:{state:State;trajectorie
   const rounds=new Map<string,number>();let lastObs:any=null,lastObsTime=0;hasTranscript.add(t.agentId);
   for(const e of t.messages){
    const m=e.message;
-   if(m.role==='user'){const o=parse(m.content);if(o?.kind==='provider_error')events.push({time:e.time,order:1e6,lines:[`### ${rel(e.time)} · ${t.name} · provider error`,`${clip(o.error,300)}`]});else if(o?.book){lastObs=o;lastObsTime=o.serverTime??e.time;}continue;}
+   if(m.role==='user'){const raw=parse(m.content),o=asView(raw);if(raw?.kind==='provider_error')events.push({time:e.time,order:1e6,lines:[`### ${rel(e.time)} · ${t.name} · provider error`,`${clip(raw.error,300)}`]});else if(o){lastObs=o;lastObsTime=o.serverTime??e.time;}continue;}
    if(m.role!=='assistant')continue;
    const round=rounds.get(e.decisionId)??0;rounds.set(e.decisionId,round+1);shown.add(`${t.agentId}|${e.decisionId}|${round}`);
    const row=decisions.find(d=>d.agentId===t.agentId&&d.decisionId===e.decisionId&&d.round===round);
    const meta=[row?.llmMs!=null?`LLM ${secs(row.llmMs)}`:'',row?.stalenessMs!=null?`staleness ${secs(row.stalenessMs)}`:'',row?.bookMoved?'book moved':'',row?.late?'LATE, not executed':''].filter(Boolean).join(' · ');
    const lines=[`### ${rel(e.time)} · ${t.name}${round?' · follow-up':''}${meta?' · '+meta:''}`];
-   if(lastObs)lines.push(`Saw (${rel(lastObsTime)}): last ${money(lastObs.lastPrice)} · bid ${money(lastObs.book?.bestBid)} / ask ${money(lastObs.book?.bestAsk)} · position ${qty(lastObs.position?.position)} · P&L ${signed(lastObs.position?.pnl)} · ${lastObs.openOrders?.length??0} open orders · ${secs(lastObs.remainingMs)} left`);
+   if(lastObs)lines.push(`Saw (${rel(lastObsTime)}): last ${money(lastObs.lastPrice)} · bid ${money(lastObs.book?.bestBid)} / ask ${money(lastObs.book?.bestAsk)} · position ${qty(lastObs.position?.position)} · P&L ${signed(lastObs.position?.pnl)} · ${lastObs.openOrders?.length??0} open orders${lastObs.atlasSince!=null?` · ${lastObs.atlasSince} Atlas fills since last turn`:''} · ${secs(lastObs.remainingMs)} left`);
    if(row?.reasoning)lines.push(`Thought: ${row.reasoning.replace(/\s*\n\s*/g,' ')}`);
    if(typeof m.content==='string'&&m.content.trim()&&!isActionJson(m.content))lines.push(`Said: ${clip(m.content,600)}`);
    if(m.tool_calls?.length){lines.push('Did:');for(const c of m.tool_calls){const args=parse(c.function.arguments)||{};lines.push(`- ${describeCall(c.function.name,args)} → ${describeOutcome(toolResults.get(c.id))}`);}}
