@@ -57,6 +57,13 @@
       "when": 1793556402842,
       "tag": "0007_message_replay",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1795810212568,
+      "tag": "0008_prompt_cache_usage",
+      "breakpoints": true
     }
   ]
 }

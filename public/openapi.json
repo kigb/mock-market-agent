@@ -588,6 +588,12 @@
                     "minimum": 0,
                     "maximum": 1000000
                   },
+                  "cachedPromptTokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000,
+                    "description": "Provider-reported cached portion of inputTokens. Omit when unavailable."
+                  },
                   "outputTokens": {
                     "type": "integer",
                     "minimum": 0,
@@ -732,7 +738,7 @@
         ],
         "responses": {
           "200": {
-            "description": "decisions: rows with source (server|self_reported), provider, model, reasoningEffort, temperature, maxTokens, observationTime, responseTime, executionTime, observationRevision, executionRevision, llmMs, executionMs, stalenessMs (= executionTime \u2212 observationTime), casRetries, promptTokens, completionTokens, observed/executed best bid and ask, bookMoved, late, note, reasoning (the provider\u2019s hidden chain of thought in full, never replayed to the model), and actions (per-action outcome with marketableAtObservation and missedFill)."
+            "description": "decisions: rows with source (server|self_reported), provider, model, reasoningEffort, temperature, maxTokens, observationTime, responseTime, executionTime, observationRevision, executionRevision, llmMs, executionMs, stalenessMs (= executionTime \u2212 observationTime), casRetries, promptTokens, cachedPromptTokens (null when unreported), completionTokens, observed/executed best bid and ask, bookMoved, late, note, reasoning (the provider\u2019s hidden chain of thought in full, never replayed to the model), and actions (per-action outcome with marketableAtObservation and missedFill)."
           },
           "403": {
             "description": "Opponent metrics access denied."

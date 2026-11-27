@@ -1,12 +1,50 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {complete} from '../lib/arena/providers.ts';
+import {complete,ProviderReplyError} from '../lib/arena/providers.ts';
+import {addTokenUsage,promptCacheSummary} from '../lib/arena/usage.ts';
 import {converse,headerSnapshot,leanSnapshot,leanToolResult,normalizeCompletion,partyLabels,READ_TOOLS,readSummary,redactMessage,replayView,type ChatMessage,type Completion,type TranscriptEntry} from '../lib/arena/conversation.ts';
 import {createGame as createArenaGame,startGame,intent,observation} from '../lib/arena/engine.ts';
 // Pin these compatibility fixtures to the original hidden-center mode.
 const createGame=(...args:Parameters<typeof createArenaGame>)=>{args[7]??=180000;args[8]??='hidden_center';return createArenaGame(...args);};
 const config={provider:'sail' as const,model:'fixture',apiKey:'TEST_PROVIDER_SECRET'};
 const tool=(id:string,name:string,args:object)=>({id,type:'function',function:{name,arguments:JSON.stringify(args)}});
+
+test('Fireworks reuses a conversation routing key and fetches a fresh answer to each observation',async()=>{
+ const requests:{header:string|null;body:any}[]=[];
+ const fetcher:typeof fetch=async(_url,init)=>{
+  requests.push({header:new Headers(init?.headers).get('x-session-affinity'),body:JSON.parse(init!.body as string)});
+  return Response.json({choices:[{message:{content:`reply ${requests.length}`}}],usage:{completion_tokens:3}},
+   {headers:{'fireworks-prompt-tokens':'20','fireworks-cached-prompt-tokens':'16'}});
+ };
+ const fireworks={...config,provider:'fireworks' as const};
+ for(const [key,price] of [['game:a',42],['game:a',43],['game:b',43]] as const){
+  const result=await complete(fireworks,[{role:'user',content:String(price)}],1000,fetcher,undefined,key);
+  assert.deepEqual(result.usage,{promptTokens:20,completionTokens:3,cachedPromptTokens:16});
+  assert.equal(result.message.content,`reply ${requests.length}`);
+ }
+ const other=await complete(config,[],1000,fetcher,undefined,'game:a');
+ assert.deepEqual(requests.map(r=>r.header),['game:a','game:a','game:b',null]);
+ assert.deepEqual(requests[0].body.messages[0],requests[1].body.messages[0]);
+ assert.deepEqual(requests[0].body.tools,requests[1].body.tools);
+ assert.deepEqual(requests.slice(0,2).map(r=>r.body.messages.at(-1).content),['42','43']);
+ assert.equal(other.usage.cachedPromptTokens,null);
+});
+
+test('cache coverage counts an explicit zero and excludes unknown or inconsistent reports',async()=>{
+ const agent=createGame('game','host','',[{name:'Cache',provider:'external'}],0).agents[0];
+ const call=(usage:object,headers?:Record<string,string>,content:string|null='ok')=>complete({...config,provider:'fireworks'},[],1000,
+  async()=>Response.json({choices:[{message:{content}}],usage},{headers}));
+ assert.equal(promptCacheSummary(agent.cachedPromptTokens,agent.cacheReportedPromptTokens),'Not reported');
+ for(const [tokens,cached,expected] of [[10,0,0],[20,15,15],[30,31,null],[40,undefined,null]] as const){
+  const result=await call({prompt_tokens:tokens,prompt_tokens_details:{cached_tokens:cached}},{'fireworks-cached-prompt-tokens':'invalid'});
+  assert.equal(result.usage.cachedPromptTokens,expected);
+  addTokenUsage(agent,result.usage);
+ }
+ assert.equal(agent.promptTokens,100);
+ assert.equal(promptCacheSummary(agent.cachedPromptTokens,agent.cacheReportedPromptTokens),'50.0% (15 / 30)');
+ await assert.rejects(call({prompt_tokens:24,prompt_tokens_details:{cached_tokens:18}},undefined,null),
+  (error:Error)=>error instanceof ProviderReplyError&&error.usage.cachedPromptTokens===18);
+});
 
 test('a read tool gets its result back, then the model trades with its entire earlier conversation intact',async()=>{
  const g=createGame('game_history','host','',[{name:'Memory agent',provider:'external'},{name:'Counterparty',provider:'external'}],1000);startGame(g,2000);

@@ -1,4 +1,5 @@
 import {ArenaError,type Intent} from './engine.ts';
+import type {TokenUsage} from './usage.ts';
 // Model-facing view of a market snapshot: the static rules are in the system prompt, the account is reduced to its trading
 // view, orders and fills are compact, and every Atlas execution so far is kept. REST/MCP observations keep every field.
 export function leanSnapshot<T>(value:T,others?:PartyLabels):T{
@@ -21,7 +22,7 @@ export function leanToolResult<T extends {ok:boolean;result?:any}>(entry:T,other
 export type ToolCall={id:string;type:'function';function:{name:string;arguments:string}};
 export type ChatMessage={role:'user'|'assistant'|'tool';content:string|null;tool_calls?:ToolCall[];tool_call_id?:string;reasoning_content?:string};
 // Reasoning stays outside the saved conversation. Fireworks can reuse it in memory for tool follow-ups in this decision.
-export type Completion={message:ChatMessage;calls:{id:string;intent:Intent}[];reasoning?:string;latencyMs:number;usage:{promptTokens:number;completionTokens:number}};
+export type Completion={message:ChatMessage;calls:{id:string;intent:Intent}[];reasoning?:string;latencyMs:number;usage:TokenUsage};
 // replay: when set, this is what the model sees on later turns instead of the stored message (ephemeral read results).
 export type TranscriptEntry={id:number;time:number;decisionId:string;step:number;message:ChatMessage;replay?:ChatMessage|null};
 export const READ_TOOLS=new Set(['get_rules','get_order_book','get_position','get_atlas_history','get_fills']);

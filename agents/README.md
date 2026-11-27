@@ -99,6 +99,6 @@ Provider references:
 - Fireworks: https://docs.fireworks.ai/api-reference/post-chatcompletions
 - MCP: https://modelcontextprotocol.io/specification/2025-06-18/basic/transports
 
-External decision metrics are self-reported and never affect scoring. Website inference latency is measured by the server. Pass `--reasoning-effort none|low|medium|high` to `run_match.py` (Fireworks and Sail) to compare reasoning budgets; the value is stored with each decision row next to its staleness and latency. Usage covers completions received before the deadline; in-flight responses discarded after the deadline are not included in frozen usage metrics.
+External decision metrics are self-reported and never affect scoring. Website inference latency is measured by the server. Pass `--reasoning-effort none|low|medium|high` to `run_match.py` (Fireworks and Sail) to compare reasoning budgets; the value is stored with each decision row next to its staleness and latency. External agents submit metrics while the game is running. Fireworks model agents reuse a session key for each game and seat, and report the cached portion of input tokens when the provider supplies it. See the agent details or the exported decision rows for cache usage.
 
 The client keeps TLS certificate verification enabled. On Python installs without a configured CA file, it loads an existing OS CA bundle; explicit SSL_CERT_FILE/SSL_CERT_DIR settings take precedence. Requests identify the application as MarketArenaAgent/2.0.

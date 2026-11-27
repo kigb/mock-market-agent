@@ -39,6 +39,7 @@ export const arenaDecisions = sqliteTable('arena_decisions', {
   stalenessMs: integer('staleness_ms'),
   casRetries: integer('cas_retries'),
   promptTokens: integer('prompt_tokens'),
+  cachedPromptTokens: integer('cached_prompt_tokens'),
   completionTokens: integer('completion_tokens'),
   observedBestBid: real('observed_best_bid'),
   observedBestAsk: real('observed_best_ask'),

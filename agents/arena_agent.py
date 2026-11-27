@@ -245,9 +245,11 @@ class BaseAgent:
                     # Optional telemetry follows trading so a telemetry error cannot discard a chosen action.
                     # observationTime and executionTime are server stamps, so staleness is clock-consistent;
                     # responseTime is this machine's clock when the model replied.
+                    cache = self.last_usage.get('cached_prompt_tokens')
                     self.call('record_decision', latencyMs=latency,
                               inputTokens=self.last_usage.get('prompt_tokens', 0),
                               outputTokens=self.last_usage.get('completion_tokens', 0),
+                              **({'cachedPromptTokens': cache} if cache is not None else {}),
                               observationTime=observation_time, responseTime=response_time, executionTime=execution_time,
                               round=turn, model=getattr(self, 'model', None),
                               reasoningEffort=getattr(self, 'reasoning_effort', None) or None,
@@ -270,6 +272,27 @@ class BaseAgent:
             time.sleep(max(.25, self.interval - (time.monotonic() - started)))
 
 READ_TOOLS = ('get_rules', 'get_order_book', 'get_position', 'get_atlas_history', 'get_fills')
+
+def completion_usage(data: dict, headers, provider: str) -> dict:
+    def count(value):
+        if isinstance(value, str) and value.isascii() and value.isdecimal() and len(value) <= 16:
+            value = int(value)
+        return value if type(value) is int and 0 <= value <= 2**53 - 1 else None
+
+    def header(name):
+        return count(headers.get(name)) if provider == 'fireworks' else None
+
+    usage = data.get('usage') or {}
+    prompt = header('fireworks-prompt-tokens')
+    if prompt is None:
+        prompt = count(usage.get('prompt_tokens'))
+    result = {'prompt_tokens': prompt or 0, 'completion_tokens': count(usage.get('completion_tokens')) or 0}
+    details = usage.get('prompt_tokens_details') or {}
+    for cached in (header('fireworks-cached-prompt-tokens'), count(details.get('cached_tokens'))):
+        if cached is not None and prompt is not None and cached <= prompt:
+            result['cached_prompt_tokens'] = cached
+            break
+    return result
 
 def label_party(ident, me, others=None):
     """you / Atlas / a stable pseudonym (other-N) for another agent, assigned in order of first appearance."""
@@ -460,6 +483,7 @@ class ModelAgent(BaseAgent):
         self.url = endpoints[provider].rstrip('/') + '/chat/completions'
         self.api_key, self.model = api_key, model
         self.provider = provider
+        self.cache_session = None
         self.temperature, self.max_tokens, self.prompt = temperature, max_tokens, prompt
         self.history: list[dict] = []
         self.trajectory: list[dict] = []
@@ -527,6 +551,11 @@ class ModelAgent(BaseAgent):
         headers = {'Content-Type': 'application/json', 'User-Agent': 'MarketArenaAgent/3.0'}
         if self.api_key:
             headers['Authorization'] = 'Bearer ' + self.api_key
+        if self.provider == 'fireworks':
+            if self.cache_session is None:
+                seat_id = (o.get('position') or {}).get('id') or uuid.uuid4()
+                self.cache_session = f'{self.game_id}:{seat_id}'
+            headers['x-session-affinity'] = self.cache_session
         system = ('Compete in this timed trading arena; the rules give durationSeconds and every snapshot gives remainingMs. Maximize final total P&L: cash plus inventory valued according to this game’s selected settlement rule. '
                   'Market-relative mode has no hidden value and settles at trade VWAP; infer C only when hidden_center mode is explicitly selected. Obey reserved position capacity and use protected prices for taking. No opening price is supplied. '
                   'Your conversation from this round is retained; each turn you get only a short header (time left, last price, best bid/ask, position, P&L, open-order count, Atlas fills since your last turn) and pull details with get_order_book, get_atlas_history, get_fills or get_position. Read results are shown only within the current decision; later turns see a one-line reminder, so read again when you need current data. '
@@ -546,7 +575,7 @@ class ModelAgent(BaseAgent):
             with urlopen(Request(self.url, json.dumps(payload).encode(), headers, method='POST'), timeout=timeout, context=TLS_CONTEXT) as r:
                 data = json.load(r)
                 message = data['choices'][0]['message']
-                self.last_usage = data.get('usage', {})
+                self.last_usage = completion_usage(data, getattr(r, 'headers', {}), self.provider)
         except HTTPError as exc:
             if exc.code == 400:
                 detail = exc.read(256000).decode(errors='replace')

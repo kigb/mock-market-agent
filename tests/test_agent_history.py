@@ -10,6 +10,7 @@ from arena_agent import ModelAgent
 class FakeMCP:
     def __init__(self):
         self.metrics = 0
+        self.metric_rows = []
         self.orders = []
     def tools(self):
         return [{'name': name, 'description': name, 'inputSchema': {'type': 'object', 'properties': {}, 'required': []}}
@@ -27,10 +28,37 @@ class FakeMCP:
             return {'result': {'orderId': 'new-order', 'filledQuantity': 1}}
         if name == 'record_decision':
             self.metrics += 1
+            self.metric_rows.append(arguments)
             return {'result': {'recorded': True}}
         return {'result': {'status': 'waiting'}}
 
 class AgentHistoryTests(unittest.TestCase):
+    def test_fireworks_affinity_and_cache_telemetry_across_turns(self):
+        mcp = FakeMCP()
+        agent = ModelAgent(mcp=mcp, game_id='game_test', agent_token='PRIVATE_AGENT_TOKEN',
+                           provider='fireworks', model='fixture', api_key='PRIVATE_PROVIDER_KEY')
+        sessions = []
+        def provider(request, **kwargs):
+            sessions.append(dict((k.lower(), v) for k, v in request.header_items()).get('x-session-affinity'))
+            reply = io.BytesIO(b'{"choices":[{"message":{"content":"Waiting."}}],"usage":{"prompt_tokens":25}}')
+            reply.headers = {'fireworks-prompt-tokens': '30', 'fireworks-cached-prompt-tokens': '0'} if len(sessions) == 1 else {}
+            return reply
+        with patch('arena_agent.urlopen', provider), patch('arena_agent.time.sleep'):
+            agent.run()
+            other = ModelAgent(mcp=FakeMCP(), game_id='game_test', agent_token='OTHER_AGENT_TOKEN',
+                               provider='fireworks', model='fixture', api_key='PRIVATE_PROVIDER_KEY')
+            other.decide(other.observe())
+            sail = self.make_agent()
+            sail.decide(sail.observe())
+        self.assertEqual(sessions[0], sessions[1])
+        self.assertNotEqual(sessions[0], sessions[2])
+        self.assertIsNone(sessions[3])
+        self.assertNotIn(agent.agent_token, sessions[0])
+        self.assertNotIn(agent.api_key, sessions[0])
+        self.assertEqual(mcp.metric_rows[0]['cachedPromptTokens'], 0)
+        self.assertEqual(mcp.metric_rows[0]['inputTokens'], 30)
+        self.assertNotIn('cachedPromptTokens', mcp.metric_rows[1])
+
     def make_agent(self, mcp=None):
         return ModelAgent(mcp=mcp or FakeMCP(), game_id='game_fixture', agent_token='PRIVATE_AGENT_TOKEN',
                           provider='sail', model='fixture', api_key='PRIVATE_PROVIDER_KEY')

@@ -1,0 +1,1 @@
+ALTER TABLE `arena_decisions` ADD `cached_prompt_tokens` integer;

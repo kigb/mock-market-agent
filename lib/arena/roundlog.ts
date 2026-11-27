@@ -1,5 +1,6 @@
 // Human-readable round log: what every agent saw, said, and did, in order, with Atlas executions and the market
 // state between decisions. Built from the public state, the stored transcripts, and the decision-metric rows.
+import {promptCacheSummary} from './usage.ts';
 import type {publicState} from './engine.ts';
 import type {TranscriptEntry} from './conversation.ts';
 import type {DecisionEntry} from './store.ts';
@@ -113,6 +114,7 @@ export function roundLog({state,trajectories,decisions}:{state:State;trajectorie
   const peak=path.length?path.reduce((m,p)=>p.pnl>m.pnl?p:m):null,trough=path.length?path.reduce((m,p)=>p.pnl<m.pnl?p:m):null;
   const llm=rows.map(r=>r.llmMs).filter((x):x is number=>typeof x==='number'),st=rows.map(r=>r.stalenessMs).filter((x):x is number=>typeof x==='number'),missed=rows.reduce((n,d)=>n+((Array.isArray(d.actions)?d.actions:[]) as any[]).filter(x=>x.missedFill).length,0),providerErrors=rows.filter(d=>((Array.isArray(d.actions)?d.actions:[]) as any[]).some(x=>x.action==='provider_error')).length,late=rows.filter(d=>d.late).length,moved=rows.filter(d=>d.bookMoved).length;
   out.push(`### ${a.name}`,'',`- ${a.model??a.strategy??a.provider}${rows.find(r=>r.reasoningEffort)?.reasoningEffort?' · reasoning '+rows.find(r=>r.reasoningEffort)!.reasoningEffort:''} · ${a.calls} calls · ${rows.length} decision rounds · ${a.historyMessages} history messages · ${a.promptTokens} / ${a.completionTokens} tokens`,
+   ...(a.cachedPromptTokens!=null?[`- Prompt cache (cached / reported input) · ${promptCacheSummary(a.cachedPromptTokens,a.cacheReportedPromptTokens)}`]:[]),
    `- Actions: ${[...counts.entries()].map(([k,v])=>`${k} ×${v}`).join(', ')||'none'}`,
    `- Fills: ${a.fills} (${a.makerFills} maker / ${a.takerFills} taker), ${a.filledQuantity} contracts, fill rate ${(a.fillRate*100).toFixed(0)}%, ${a.cancellations} cancels, ${a.expiredOrders} expired at the close`,
    `- Result: P&L ${signed(a.pnl)} (realized ${signed(a.realizedPnl)}, unrealized ${signed(a.unrealizedPnl)}), final position ${a.position>0?'+':''}${a.position}${a.averageEntry!=null?' @ avg '+money(a.averageEntry):''}, peak position ${a.peakPosition}, score drawdown ${money(a.maxDrawdown)}`+(peak&&trough?`; live P&L peaked ${signed(peak.pnl)} at ${rel(peak.time)} and bottomed ${signed(trough.pnl)} at ${rel(trough.time)}`:''),

@@ -23,8 +23,20 @@ const duplicate=await api('games/'+id+'/orders','POST',{side:'sell',quantity:7,t
 await api('games/'+id+'/cancel','POST',{},a.token);assert.equal((await api('games/'+id+'/book','GET',undefined,a.token)).result.openOrders.length,0);
 const hist=await rpc('tools/call',{name:'get_atlas_history',arguments:{gameId:id,agentToken:a.token,limit:5}});assert.equal(hist.result.isError,false);assert.ok(Array.isArray(hist.result.structuredContent.result.ticks)&&typeof hist.result.structuredContent.result.total==='number');const fillsRead=await rpc('tools/call',{name:'get_fills',arguments:{gameId:id,agentToken:a.token,limit:3}});assert.equal(fillsRead.result.isError,false);assert.ok(Array.isArray(fillsRead.result.structuredContent.result.fills));
 const tokenUsage=await rpc('tools/call',{name:'record_decision',arguments:{gameId:id,agentToken:a.token,latencyMs:123,inputTokens:10,outputTokens:5,requestId:'external-metrics'}});assert.equal(tokenUsage.result.isError,false);assert.equal(tokenUsage.result.structuredContent.state.agents[0].calls,1);
+assert.equal(tokenUsage.result.structuredContent.state.agents[0].cachedPromptTokens,null);
+for(const [requestId,inputTokens,cachedPromptTokens] of [['cache-hit',8,6],['cache-miss',4,0],['cache-hit',8,6]]){
+ const res=await api('games/'+id+'/metrics','POST',{requestId,latencyMs:10,inputTokens,cachedPromptTokens},a.token);
+ assert.equal(res.status,200);
+}
+const badCache=await api('games/'+id+'/metrics','POST',{requestId:'invalid',latencyMs:10,inputTokens:2,cachedPromptTokens:3},a.token);
+assert.equal(badCache.status,400);
+const cacheRows=await api('games/'+id+'/decisions','GET',undefined,a.token);
+assert.deepEqual(cacheRows.decisions.map(r=>r.cachedPromptTokens),[null,6,0]);
 const origin=await fetch(url+'/mcp',{method:'POST',headers:{'Content-Type':'application/json',Origin:'https://evil.example'},body:'{}'});assert.equal(origin.status,403);
 const exported=await fetch(url+'/api/arena/games/'+id+'/export',{method:'POST',headers:{'X-Arena-Token':host}});assert.equal(exported.status,200);assert.ok(exported.headers.get('Content-Disposition').includes('attachment'));const report=await exported.json();assert.ok(!JSON.stringify(report).includes(host));assert.equal(report.rules.ticker,'MOCK');
+const cacheSeat=report.results.agents.find(seat=>seat.id===a.id);
+assert.deepEqual([cacheSeat.cachedPromptTokens,cacheSeat.cacheReportedPromptTokens,cacheSeat.promptTokens],[6,12,22]);
+assert.equal(report.decisions.find(row=>row.decisionId==='cache-hit').cachedPromptTokens,6);
 console.log('PASS: REST + MCP discovery, registration, ownership, token privacy, 16 concurrent orders, cancellations, duplicate receipts, origin checks, and external telemetry.');
 
 const defaults=await api('defaults');assert.equal(defaults.agents.length,6);assert.equal(new Set(defaults.agents.map(a=>a.model)).size,4);assert.equal(typeof defaults.available,'boolean');assert.ok(!JSON.stringify(defaults).includes('apiKey'));

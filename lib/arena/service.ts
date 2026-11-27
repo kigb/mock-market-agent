@@ -4,7 +4,8 @@ import {defaultAgent,DEFAULT_MAX_TOKENS,DEFAULT_STRATEGY,presetCallLimit} from '
 import {addAgent,addEvent,ArenaError,callLimit,createGame,DURATION,durationOf,ensureRunning,intent,MIN_DECISION_GAP_MS,observation,orderBook,publicState,RULES,modeRules,rulesFor,startGame,type AgentSpec,type Game,type Intent} from './engine.ts';
 import {agentAuth,authenticate,change,insertGame,replayMessages,reserveDefaultCall} from './store.ts';
 import {converse,headerSnapshot,labelParty,labelTicks,leanOrders,leanPosition,leanSnapshot,leanToolResult,partyLabels,READ_TOOLS,readSummary,scriptedCompletion,type ChatMessage,type Completion} from './conversation.ts';
-import {baseline,endpoint,complete,effectiveReasoningEffort,type ModelConfig} from './providers.ts';
+import {addTokenUsage} from './usage.ts';
+import {baseline,endpoint,complete,effectiveReasoningEffort,ProviderReplyError,type ModelConfig} from './providers.ts';
 export async function makeGame(specs:AgentSpec[]=[],seed=42,owner='',durationMs:number|undefined=undefined,botMode:BotMode=DEFAULT_BOT_MODE){const now=Date.now(),g=createGame('game_'+crypto.randomUUID(),crypto.randomUUID()+crypto.randomUUID(),owner,specs,now,seed,undefined,durationMs,botMode);await insertGame(g);return {state:publicState(g,now),revision:0,hostToken:g.hostToken,agentTokens:g.agents.filter(a=>a.id!=='$atlas').map(a=>({id:a.id,name:a.name,token:a.token}))};}
 export function runAction(g:Game,agentToken:string,input:any,now:number){
  const a=agentAuth(g,agentToken);
@@ -28,6 +29,8 @@ export async function callTool(name:string,args:any,owner=''){
   const prior=g.receipts.find(r=>r.agentId===a.id&&r.id===args.requestId);if(prior)return prior.result;
   if(typeof args.latencyMs!=='number'||!Number.isFinite(args.latencyMs)||args.latencyMs<0||args.latencyMs>60000)throw new ArenaError('Invalid latency.');
   for(const n of [args.inputTokens??0,args.outputTokens??0])if(!Number.isInteger(n)||n<0||n>1000000)throw new ArenaError('Invalid token usage.');
+  const usage={promptTokens:args.inputTokens??0,completionTokens:args.outputTokens??0,cachedPromptTokens:args.cachedPromptTokens??null};
+  if(usage.cachedPromptTokens!==null&&(!Number.isInteger(usage.cachedPromptTokens)||usage.cachedPromptTokens<0||args.inputTokens==null||usage.cachedPromptTokens>usage.promptTokens))throw new ArenaError('Cached prompt tokens must be between zero and the reported input tokens.');
   // Self-reported timestamps are epoch ms. observationTime/executionTime should be server stamps (serverTime, state.now) so staleness is clock-consistent.
   const stamp=(value:unknown,label:string)=>{if(value===undefined||value===null)return null;if(typeof value!=='number'||!Number.isFinite(value)||value<g.createdAt-3600000||value>now+3600000)throw new ArenaError(`Invalid ${label}.`);return Math.round(value);};
   const observationTime=stamp(args.observationTime,'observation time'),responseTime=stamp(args.responseTime,'response time'),executionTime=stamp(args.executionTime,'execution time'),round=args.round??0;
@@ -37,8 +40,8 @@ export async function callTool(name:string,args:any,owner=''){
   if(args.note!==undefined&&args.note!==null&&(typeof args.note!=='string'||args.note.length>600))throw new ArenaError('Invalid note; use up to 600 characters.');
   if(args.reasoning!==undefined&&args.reasoning!==null&&(typeof args.reasoning!=='string'||args.reasoning.length>100000))throw new ArenaError('Invalid reasoning; use up to 100,000 characters.');
   if(a.calls>=callLimit(g))throw new ArenaError('External telemetry limit reached.',429);
-  a.calls++;a.latencySamples=(a.latencySamples??0)+1;a.latencyMs+=args.latencyMs;a.promptTokens+=args.inputTokens??0;a.completionTokens+=args.outputTokens??0;
-  tx.record({agentId:a.id,decisionId:args.requestId,round,source:'self_reported',provider:'external',model:args.model??a.model??null,reasoningEffort:args.reasoningEffort??null,observationTime,responseTime,executionTime,llmMs:Math.round(args.latencyMs),executionMs:responseTime!==null&&executionTime!==null?executionTime-responseTime:null,stalenessMs:observationTime!==null&&executionTime!==null?executionTime-observationTime:null,promptTokens:args.inputTokens??0,completionTokens:args.outputTokens??0,late:false,actions:args.actions??null,note:args.note??null,reasoning:args.reasoning??null});
+  a.calls++;a.latencySamples=(a.latencySamples??0)+1;a.latencyMs+=args.latencyMs;addTokenUsage(a,usage);
+  tx.record({agentId:a.id,decisionId:args.requestId,round,source:'self_reported',provider:'external',model:args.model??a.model??null,reasoningEffort:args.reasoningEffort??null,observationTime,responseTime,executionTime,llmMs:Math.round(args.latencyMs),executionMs:responseTime!==null&&executionTime!==null?executionTime-responseTime:null,stalenessMs:observationTime!==null&&executionTime!==null?executionTime-observationTime:null,...usage,late:false,actions:args.actions??null,note:args.note??null,reasoning:args.reasoning??null});
   const result={recorded:true};g.receipts.push({agentId:a.id,id:args.requestId,result});g.receipts=g.receipts.slice(-500);return result;});
  if(name==='get_results')return change(args.gameId,(g)=>{authenticate(g,args.token);return {status:g.status};});
  if(!['get_order_book','get_position','get_atlas_history','get_fills','place_order','replace_order','cancel_order','cancel_all','wait'].includes(name))throw new ArenaError('Unknown MCP tool.',404);
@@ -98,9 +101,10 @@ export async function decision(id:string,token:string,config:ModelConfig|undefin
    // Read results are ephemeral: later turns replay a one-line reminder instead of the data.
    const replays=results.map((result,i)=>READ_TOOLS.has(outcome.calls[i].intent.action)&&result.ok?{role:'tool' as const,tool_call_id:outcome.calls[i].id,content:JSON.stringify(readSummary(outcome.calls[i].intent.action,result.result))}:null);
    journal(a.id,leaseId,startStep,[outcome.message,...replies],[config?.apiKey??''],[null,...replays]);
-   if(!late){a.latencySamples=(a.latencySamples??0)+1;a.latencyMs+=outcome.latencyMs;a.promptTokens+=outcome.usage.promptTokens;a.completionTokens+=outcome.usage.completionTokens;addEvent(g,now,a.id,'decision',`${a.name} · ${outcome.calls.length} tool calls · ${outcome.latencyMs} ms · history retained`);}
+   addTokenUsage(a,outcome.usage);
+   if(!late){a.latencySamples=(a.latencySamples??0)+1;a.latencyMs+=outcome.latencyMs;addEvent(g,now,a.id,'decision',`${a.name} · ${outcome.calls.length} tool calls · ${outcome.latencyMs} ms · history retained`);}
    const responded=respondedAt||now;
-   tx.record({agentId:a.id,decisionId:leaseId,round,source:'server',provider:a.provider,model:a.model??null,reasoningEffort:effectiveReasoningEffort(config),temperature:config?config.temperature??.3:null,maxTokens:config?config.maxTokens??512:null,observationTime:inputTime,responseTime:config?responded:null,executionTime:now,observationRevision:inputRevision,executionRevision:tx.revision,llmMs:config?outcome.latencyMs:null,executionMs:config?now-responded:null,stalenessMs:now-inputTime,casRetries:tx.attempt,promptTokens:outcome.usage.promptTokens,completionTokens:outcome.usage.completionTokens,observedBestBid:inputBook.bestBid,observedBestAsk:inputBook.bestAsk,executedBestBid:before.bestBid,executedBestAsk:before.bestAsk,bookMoved:inputBook.bestBid!==before.bestBid||inputBook.bestAsk!==before.bestAsk,late,actions:outcome.calls.map((call,i)=>summarizeAction(call.intent,results[i],inputBook)),note:config&&typeof outcome.message.content==='string'?outcome.message.content:null,reasoning:outcome.reasoning??null});
+   tx.record({agentId:a.id,decisionId:leaseId,round,source:'server',provider:a.provider,model:a.model??null,reasoningEffort:effectiveReasoningEffort(config),temperature:config?config.temperature??.3:null,maxTokens:config?config.maxTokens??512:null,observationTime:inputTime,responseTime:config?responded:null,executionTime:now,observationRevision:inputRevision,executionRevision:tx.revision,llmMs:config?outcome.latencyMs:null,executionMs:config?now-responded:null,stalenessMs:now-inputTime,casRetries:tx.attempt,...outcome.usage,observedBestBid:inputBook.bestBid,observedBestAsk:inputBook.bestAsk,executedBestBid:before.bestBid,executedBestAsk:before.bestAsk,bookMoved:inputBook.bestBid!==before.bestBid||inputBook.bestAsk!==before.bestAsk,late,actions:outcome.calls.map((call,i)=>summarizeAction(call.intent,results[i],inputBook)),note:config&&typeof outcome.message.content==='string'?outcome.message.content:null,reasoning:outcome.reasoning??null});
    const after=orderBook(g);return {replies,late,results,book:{bestBid:after.bestBid,bestAsk:after.bestAsk} as Book};
   });
   inferenceStarted=0;respondedAt=0;step+=messageCount;totalActions+=outcome.calls.length;totalRounds++;
@@ -118,15 +122,17 @@ export async function decision(id:string,token:string,config:ModelConfig|undefin
   else{
    const messages=await replayMessages(id,agentId);
    const rules=claim.result.rules;
-   await converse({messages,deadline,interleavedReasoning:config?.provider==='fireworks',beforeCall,complete:async(history,remaining)=>{inferenceStarted=Date.now();const outcome=await complete(config!,history,remaining,undefined,rules);respondedAt=Date.now();return outcome;},commit});
+   await converse({messages,deadline,interleavedReasoning:config?.provider==='fireworks',beforeCall,complete:async(history,remaining)=>{inferenceStarted=Date.now();const outcome=await complete(config!,history,remaining,undefined,rules,`${id}:${agentId}`);respondedAt=Date.now();return outcome;},commit});
   }
   const released=await change(id,(g)=>{const a=agentAuth(g,token);if(a.leaseId===leaseId){a.leaseId='';a.leaseUntil=0;}return {modelRounds:totalRounds,toolCalls:totalActions,historyMessages:a.historyMessages??0};});return released;
  }catch(error){
   const message=error instanceof ArenaError&&/timed out/.test(error.message)&&Date.now()>=claim.result.endsAt?'Game ended before the model replied; no action was executed.':error instanceof ArenaError?error.message:'Provider request failed.';
   await change(id,(g,now,journal,tx)=>{
    const a=agentAuth(g,token),late=g.status!=='running'||a.leaseId!==leaseId,elapsed=inferenceStarted?Date.now()-inferenceStarted:null;
+   const usage=error instanceof ProviderReplyError?error.usage:{promptTokens:0,completionTokens:0,cachedPromptTokens:null};
+   addTokenUsage(a,usage);
    journal(a.id,leaseId,step,[{role:'user',content:JSON.stringify({kind:'provider_error',serverTime:now,error:message})}],[config?.apiKey??'']);
-   tx.record({agentId:a.id,decisionId:leaseId,round:totalRounds,source:'server',provider:a.provider,model:a.model??null,reasoningEffort:effectiveReasoningEffort(config),temperature:config?config.temperature??.3:null,maxTokens:config?config.maxTokens??512:null,observationTime:inputTime,responseTime:null,executionTime:now,observationRevision:inputRevision,executionRevision:tx.revision,llmMs:elapsed,executionMs:null,stalenessMs:now-inputTime,casRetries:tx.attempt,promptTokens:0,completionTokens:0,observedBestBid:inputBook.bestBid,observedBestAsk:inputBook.bestAsk,late,actions:[{action:'provider_error',ok:false,error:message}]});
+   tx.record({agentId:a.id,decisionId:leaseId,round:totalRounds,source:'server',provider:a.provider,model:a.model??null,reasoningEffort:effectiveReasoningEffort(config),temperature:config?config.temperature??.3:null,maxTokens:config?config.maxTokens??512:null,observationTime:inputTime,responseTime:null,executionTime:now,observationRevision:inputRevision,executionRevision:tx.revision,llmMs:elapsed,executionMs:null,stalenessMs:now-inputTime,casRetries:tx.attempt,...usage,observedBestBid:inputBook.bestBid,observedBestAsk:inputBook.bestAsk,late,actions:[{action:'provider_error',ok:false,error:message}]});
    if(!late){if(inferenceStarted){a.latencySamples=(a.latencySamples??0)+1;a.latencyMs+=Date.now()-inferenceStarted;}a.leaseId='';a.leaseUntil=0;a.errors++;addEvent(g,now,a.id,'error',message);}
    return {};
   });
