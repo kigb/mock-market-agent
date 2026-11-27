@@ -5,7 +5,7 @@ import {createGame as createArenaGame,startGame,addAgent,intent,advance,observat
 const createGame=(...args:Parameters<typeof createArenaGame>)=>{args[7]??=180000;args[8]??='hidden_center';return createArenaGame(...args);};
 import {presetCallLimit} from '../lib/arena/presets.ts';
 import {createHash} from 'node:crypto';
-import {baseline,complete,endpoint,infer,parseDecision} from '../lib/arena/providers.ts';
+import {baseline,complete,effectiveReasoningEffort,endpoint,infer,parseDecision} from '../lib/arena/providers.ts';
 import {MODEL_TOOLS,MCP_TOOLS,SYSTEM_PROMPT,systemPrompt} from '../lib/arena/protocol.ts';
 // Fixtures use explicit 60-second rounds so the deadline arithmetic below stays readable; new games default to 180 s.
 function fixture(){const g=createGame('game_00000000-0000-0000-0000-000000000000','host','owner',[{name:'Alice',provider:'external'},{name:'Bob',provider:'external'}],1000,42,undefined,60_000);startGame(g,2000);return g;}
@@ -39,19 +39,46 @@ test('model tool calls and JSON fallback parse; malformed output is visible, not
 test('provider integration fixture checks auth, tools, usage and safe errors without paid calls',async()=>{const g=fixture(),a=g.agents[0],seen:any[]=[];const mock:typeof fetch=async(url,init)=>{seen.push({url,init});return Response.json({choices:[{message:{tool_calls:[{function:{name:'wait',arguments:'{}'}}]}}],usage:{prompt_tokens:42,completion_tokens:8}});};const c={provider:'sail' as const,model:'fixture-model',apiKey:'FAKE_KEY_FOR_TEST'};const out=await infer(c,observation(g,a,2001),1000,mock);assert.equal(out.actions[0].action,'wait');assert.equal(out.usage.promptTokens,42);assert.equal(seen[0].init.headers.Authorization,'Bearer FAKE_KEY_FOR_TEST');assert.ok(seen[0].init.body.includes('tools'));assert.ok(seen[0].init.body.includes('symmetric discrete Student-t offset'),'the Atlas mechanism is stated in the rules');assert.equal((JSON.parse(seen[0].init.body).messages[0].content.match(/\"bot\":/g)||[]).length,1,'and only once in the system prompt');assert.ok(seen[0].init.body.includes('market_relative'));assert.ok(!seen[0].init.body.includes(a.token));await assert.rejects(()=>infer(c,{},1000,async()=>new Response('do not leak FAKE_KEY_FOR_TEST',{status:401})),(e:any)=>e.status===502&&!e.message.includes('FAKE_KEY_FOR_TEST'));});
 
 test('six provided presets span speeds with one large-model control, pin models and intervals, reject duplicates and exclude credentials',async()=>{
- const {DEFAULT_AGENTS,SAIL_AGENTS,providedLineup}=await import('../lib/arena/presets.ts');
- assert.equal(DEFAULT_AGENTS.length,6);assert.ok(!DEFAULT_AGENTS.some(a=>/gemma/i.test(a.model)),'no Gemma slots');
- const specs=DEFAULT_AGENTS.map(a=>({...a}));
+ const {CLASSIC_AGENTS,DEFAULT_AGENTS,SAIL_AGENTS,providedLineup}=await import('../lib/arena/presets.ts');
+ assert.equal(CLASSIC_AGENTS.length,6);assert.ok(!CLASSIC_AGENTS.some(a=>/gemma/i.test(a.model)),'no Gemma slots');
+ const specs=CLASSIC_AGENTS.map(a=>({...a}));
  const g=createGame('preset-fixture','host','',specs,1000);
  assert.equal(g.agents.filter(a=>a.preset).length,6);
  assert.equal(new Set(g.agents.filter(a=>a.preset).map(a=>a.model)).size,4);
- assert.equal(providedLineup(true,true).agents,DEFAULT_AGENTS);
+ assert.equal(providedLineup(true,true,'classic').agents,CLASSIC_AGENTS);
  assert.equal(providedLineup(false,true).agents,SAIL_AGENTS);
  assert.equal(providedLineup(false,false).available,false);
- assert.ok(DEFAULT_AGENTS.every(a=>a.provider==='fireworks'&&a.model.startsWith('accounts/fireworks/')));
- assert.deepEqual(DEFAULT_AGENTS.filter(a=>a.model.endsWith('/glm-5p3')).map(a=>a.reasoningEffort),['low','medium']);
- assert.deepEqual(DEFAULT_AGENTS.filter(a=>a.model.endsWith('/glm-5p3-flash')).map(a=>a.reasoningEffort),['low','medium']);
+ assert.ok(CLASSIC_AGENTS.every(a=>a.provider==='fireworks'&&a.model.startsWith('accounts/fireworks/')));
+ assert.deepEqual(CLASSIC_AGENTS.filter(a=>a.model.endsWith('/glm-5p3')).map(a=>a.reasoningEffort),['low','medium']);
+ assert.deepEqual(CLASSIC_AGENTS.filter(a=>a.model.endsWith('/glm-5p3-flash')).map(a=>a.reasoningEffort),['low','medium']);
  assert.equal(createGame('old-sail','host','',SAIL_AGENTS,1000).agents[0].provider,'sail');
+ assert.equal(providedLineup(true,true).agents,DEFAULT_AGENTS);
+ assert.equal(g.agents.find(a=>a.preset==='fw-kimi-pro')?.name,'Kimi K3.1 Pro · low');
+});
+
+test('nine provided presets: seven plain agents across six labs and four reasoning tiers, plus two strategy-tool twins',async()=>{
+ const {DEFAULT_AGENTS}=await import('../lib/arena/presets.ts');
+ assert.equal(DEFAULT_AGENTS.length,9);
+ const specs=DEFAULT_AGENTS.map(a=>({...a}));
+ const g=createGame('preset-fixture','host','',specs,1000);
+ assert.equal(g.agents.filter(a=>a.preset).length,9);
+ assert.equal(new Set(DEFAULT_AGENTS.map(a=>a.size.split(' · ')[0])).size,6,'six labs');
+ assert.ok(DEFAULT_AGENTS.every(a=>a.provider==='fireworks'&&a.model.startsWith('accounts/fireworks/models/')),'full Fireworks model paths');
+ assert.ok(!DEFAULT_AGENTS.some(a=>/nemotron|qwen/i.test(a.model)),'no Nemotron or Qwen slot');assert.deepEqual([...new Set(DEFAULT_AGENTS.filter(a=>/flash/i.test(a.model)).map(a=>a.preset))],['fw-deepseek-flash'],'one Flash-class model');
+ // Every slot states its effort (the provider default can spend the whole completion on thinking); the plain agents span all four tiers.
+ const plain=DEFAULT_AGENTS.filter(a=>!a.strategyTools),twins=DEFAULT_AGENTS.filter(a=>a.strategyTools);
+ assert.equal(plain.length,7);assert.deepEqual(['none','low','medium','high'].map(tier=>plain.filter(a=>a.reasoningEffort===tier).length),[1,2,2,2]);
+ assert.deepEqual(plain.filter(a=>a.model.endsWith('/glm-5p3')).map(a=>a.reasoningEffort),['low','high'],'one model at two reasoning budgets');
+ // Each strategy-tool agent plays beside an untreated control: same model, same reasoning effort, same everything else.
+ assert.deepEqual(twins.map(a=>a.preset),['fw-minimax-strategy','fw-kimi-pro-strategy']);
+ for(const twin of twins){const control=plain.find(a=>a.model===twin.model)!;assert.equal(control.reasoningEffort,twin.reasoningEffort);assert.equal(control.intervalMs,twin.intervalMs);assert.equal(control.maxTokens,twin.maxTokens);assert.equal(twin.name,control.name+' + strategy');}
+ assert.deepEqual(g.agents.filter(a=>a.strategyTools).map(a=>a.preset),['fw-minimax-strategy','fw-kimi-pro-strategy'],'the flag comes from the preset, not the client');
+ const pinned=createGame('pinned','h','',[{...plain[0],strategyTools:true},{...twins[0],strategyTools:false}],1000);
+ assert.deepEqual(pinned.agents.filter(a=>a.strategyTools).map(a=>a.preset),[twins[0].preset]);
+ assert.throws(()=>createGame('x','h','',[{...plain[0],strategyTools:'yes' as any}],1000),/strategyTools must be a boolean/);
+ // Tiers a live probe showed to fail: rejected values, or thinking that exhausts the 4,096-token completion.
+ const tiers=(slug:string)=>DEFAULT_AGENTS.filter(a=>a.model.endsWith('/'+slug)).map(a=>a.reasoningEffort);
+ assert.deepEqual(tiers('deepseek-v4p1-flash-1017'),['none']);assert.ok(!tiers('gpt-oss-120b').some(t=>t==='none'||t==='high'));assert.ok(!tiers('glm-5p3').includes('none'));assert.ok(!tiers('muse-spark-open').includes('none'));
  for(const p of DEFAULT_AGENTS){
   assert.equal(g.agents.find(a=>a.preset===p.preset)?.intervalMs,0);
   assert.throws(()=>createGame('x','h','',[{...p,model:'arbitrary-model'}],1000));
@@ -60,6 +87,27 @@ test('six provided presets span speeds with one large-model control, pin models 
  }
  assert.throws(()=>createGame('x','h','',[{...specs[0],preset:'untrusted'}],1000));
  assert.ok(!JSON.stringify(publicState(g,1000)).includes('apiKey'));
+});
+
+test('Fireworks sends max_tokens, refuses silent prompt truncation, and passes reasoning effort only when set',async()=>{
+ const bodies:any[]=[],mock:typeof fetch=async(_url,init)=>{bodies.push(JSON.parse(init!.body as string));return Response.json({choices:[{message:{tool_calls:[{function:{name:'wait',arguments:'{}'}}]}}]});};
+ await infer({provider:'fireworks',model:'accounts/fireworks/models/gpt-oss-120b',apiKey:'TEST_ONLY',maxTokens:4096,reasoningEffort:'low'},{},12000,mock);
+ await infer({provider:'fireworks',model:'accounts/fireworks/models/glm-5p3-flash',apiKey:'TEST_ONLY'},{},12000,mock);
+ assert.equal(bodies[0].max_tokens,4096);assert.equal(bodies[0].max_completion_tokens,undefined);assert.equal(bodies[0].metadata,undefined);
+ assert.equal(bodies[0].context_length_exceeded_behavior,'error');assert.equal(bodies[0].reasoning_effort,'low');
+ assert.ok(!('reasoning_effort' in bodies[1]),'no reasoning parameter at the provider default');
+ assert.equal(effectiveReasoningEffort({provider:'fireworks',model:'m',apiKey:'k',reasoningEffort:'low'}),'low');
+ assert.equal(effectiveReasoningEffort({provider:'modal',model:'m',apiKey:'',baseUrl:'https://x.modal.run/v1',reasoningEffort:'low'}),null,'Modal receives no reasoning parameter');
+});
+
+test('a timeout while the reply body is still arriving is reported as a timeout, and rejected requests carry the provider’s reason',async()=>{
+ const c={provider:'fireworks' as const,model:'m',apiKey:'PRIVATE_TEST_CREDENTIAL'};
+ const stalled:typeof fetch=async()=>new Response(new ReadableStream({start(controller){controller.error(new DOMException('The operation was aborted due to timeout','TimeoutError'));}}),{status:200});
+ await assert.rejects(()=>infer(c,{},1000,stalled),(e:any)=>e instanceof ArenaError&&e.status===502&&/Provider timed out/.test(e.message));
+ const dropped:typeof fetch=async()=>new Response(new ReadableStream({start(controller){controller.error(new Error('socket hang up'));}}),{status:200});
+ await assert.rejects(()=>infer(c,{},1000,dropped),(e:any)=>e instanceof ArenaError&&/connection dropped/.test(e.message));
+ const rejected:typeof fetch=async()=>new Response(JSON.stringify({error:{message:'Invalid tool call arguments for PRIVATE_TEST_CREDENTIAL at messages[41]'}}),{status:400});
+ await assert.rejects(()=>infer(c,{},1000,rejected),(e:any)=>e instanceof ArenaError&&/Provider HTTP 400\..*Provider said: .*Invalid tool call arguments/.test(e.message)&&!e.message.includes('PRIVATE_TEST_CREDENTIAL'));
 });
 
 test('Sail uses native token limits and explicit latency/reasoning controls',async()=>{

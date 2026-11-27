@@ -39,15 +39,22 @@ assert.deepEqual([cacheSeat.cachedPromptTokens,cacheSeat.cacheReportedPromptToke
 assert.equal(report.decisions.find(row=>row.decisionId==='cache-hit').cachedPromptTokens,6);
 console.log('PASS: REST + MCP discovery, registration, ownership, token privacy, 16 concurrent orders, cancellations, duplicate receipts, origin checks, and external telemetry.');
 
-const defaults=await api('defaults');assert.equal(defaults.agents.length,6);assert.equal(new Set(defaults.agents.map(a=>a.model)).size,4);assert.equal(typeof defaults.available,'boolean');assert.ok(!JSON.stringify(defaults).includes('apiKey'));
+const defaults=await api('defaults');assert.equal(defaults.agents.length,9);assert.equal(new Set(defaults.agents.map(a=>a.model)).size,6);assert.equal(typeof defaults.available,'boolean');assert.ok(!JSON.stringify(defaults).includes('apiKey'));
+const classic=await api('defaults?lineup=classic');assert.equal(classic.status,200);assert.equal(classic.agents.length,6);
+assert.equal(classic.agents.find(a=>a.preset==='fw-kimi-pro').reasoningEffort,'low');
+assert.equal(defaults.agents.find(a=>a.preset==='fw-kimi-pro-high').reasoningEffort,'high');
+assert.deepEqual((await api('defaults?lineup=strategy')).agents,defaults.agents);assert.equal((await api('defaults?lineup=other')).status,400);
+assert.equal(rules.maxAgents,10);assert.equal((await api('rules?botMode=market_relative')).maxAgents,10);
+const classicGame=await api('games','POST',{agents:classic.agents});
+assert.equal(classicGame.status,201);assert.equal(classicGame.state.agents.length,6);assert.ok(classicGame.state.agents.every(a=>!a.strategyTools));
 const presets=defaults.agents;
 assert.equal((await api('games','POST',{botMode:'hidden_center',agents:[{...presets[0],model:'other'}]})).status,400);
 assert.equal((await api('games','POST',{botMode:'hidden_center',agents:[{...presets[0]},{...presets[0],name:'Copy'}]})).status,400);
-const presetGame=await api('games','POST',{botMode:'hidden_center',agents:presets});assert.equal(presetGame.status,201);assert.equal(presetGame.state.agents.length,6);
+const presetGame=await api('games','POST',{botMode:'hidden_center',agents:presets});assert.equal(presetGame.status,201);assert.equal(presetGame.state.agents.length,9);
 await api('games/'+presetGame.state.id+'/start','POST',{},presetGame.hostToken);
-const wrongConfig=await api('games/'+presetGame.state.id+'/decide','POST',{config:{provider:'sail',model:presets[0].model,apiKey:'TEST_ONLY',prompt:'override'}},presetGame.agentTokens[0].token);assert.equal(wrongConfig.status,400);assert.match(wrongConfig.error,/fixed server configuration/);
-const custom=await api('games','POST',{botMode:'hidden_center',agents:[{name:'Own key',provider:'sail',model:presets[0].model}]});await api('games/'+custom.state.id+'/start','POST',{},custom.hostToken);assert.equal((await api('games/'+custom.state.id+'/decide','POST',{},custom.agentTokens[0].token)).status,400);
-console.log('PASS: six fixed default slots, no duplicate slots, no client override, and custom agents never inherit the shared key.');
+const wrongConfig=await api('games/'+presetGame.state.id+'/decide','POST',{config:{provider:presets[0].provider,model:presets[0].model,apiKey:'TEST_ONLY',prompt:'override'}},presetGame.agentTokens[0].token);assert.equal(wrongConfig.status,400);assert.match(wrongConfig.error,/fixed server configuration/);
+const custom=await api('games','POST',{botMode:'hidden_center',agents:[{name:'Own key',provider:presets[0].provider,model:presets[0].model}]});await api('games/'+custom.state.id+'/start','POST',{},custom.hostToken);assert.equal((await api('games/'+custom.state.id+'/decide','POST',{},custom.agentTokens[0].token)).status,400);
+console.log('PASS: nine fixed default slots, no duplicate slots, no client override, and custom agents never inherit the shared key.');
 
 const memoryGame=await api('games','POST',{botMode:'hidden_center',agents:Array.from({length:4},(_,i)=>({name:'Memory '+i,provider:'baseline',strategy:'maker',intervalMs:500}))});
 assert.equal(memoryGame.status,201);const memoryId=memoryGame.state.id;

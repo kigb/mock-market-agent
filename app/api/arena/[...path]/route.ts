@@ -28,7 +28,11 @@ async function route(request:Request,context:Context){
    return new Response(JSON.stringify({rules:data.state.rules,results:data.state,trajectories,decisions:decisionRows},null,2),{headers:{'Content-Type':'application/json','Content-Disposition':`attachment; filename="${data.state.id}-results.json"`,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
   }
   let body:any={};if(method==='POST'){const text=await request.text();if(text.length>64000)throw new ArenaError('Request too large.',413);try{body=JSON.parse(text);}catch{throw new ArenaError('Send a JSON request body.');}if(!body||typeof body!=='object'||Array.isArray(body))throw new ArenaError('Send a JSON object.');}
-  if(path[0]==='defaults'&&method==='GET')return json(providedLineup(!!env.FIREWORKS_API_KEY,!!env.SAIL_API_KEY));
+  if(path[0]==='defaults'&&method==='GET'){
+   const lineup=new URL(request.url).searchParams.get('lineup')??'strategy';
+   if(lineup!=='strategy'&&lineup!=='classic')throw new ArenaError('Choose the strategy or classic lineup.');
+   return json(providedLineup(!!env.FIREWORKS_API_KEY,!!env.SAIL_API_KEY,lineup));
+  }
   if(path[0]==='modes'&&method==='GET')return json({defaultBotMode:DEFAULT_BOT_MODE,modes:BOT_MODES});
   if(path[0]==='rules'&&method==='GET')return json(modeRules(new URL(request.url).searchParams.get('botMode')??DEFAULT_BOT_MODE));
   if(path[0]==='tools'&&method==='GET')return json({tools:MCP_TOOLS});

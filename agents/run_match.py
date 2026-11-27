@@ -33,8 +33,8 @@ def main():
                    help='Fireworks/Sail reasoning_effort for LLM agents; recorded with every decision for latency/quality comparisons.')
     p.add_argument('--output', default='arena-results.json')
     args = p.parse_args()
-    if len(args.agents) > 8:
-        p.error('Use at most eight agents.')
+    if len(args.agents) > 10:
+        p.error('Use at most ten agents.')
     key_name = {'sail': 'SAIL_API_KEY', 'fireworks': 'FIREWORKS_API_KEY', 'modal': 'MODAL_ENDPOINT_API_KEY'}[args.provider]
     if 'llm' in args.agents and (not args.model or (args.provider != 'modal' and not os.getenv(key_name))):
         p.error(f'LLM agents need --model and the {key_name} environment variable.')

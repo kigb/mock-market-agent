@@ -1,13 +1,15 @@
 import {ArenaError,type Intent,type Agent, type Game,observation,orderBook,isRelative} from './engine.ts';
 import {normalizeCompletion,type ChatMessage} from './conversation.ts';
-import {MODEL_TOOLS,systemPrompt} from './protocol.ts';
+import {modelTools,systemPrompt} from './protocol.ts';
 import type {TokenUsage} from './usage.ts';
 export const REASONING_EFFORTS=['none','low','medium','high'] as const;
 // Per-call provider timeout. The game clock keeps running meanwhile, so slow models pay in staleness rather than being excluded.
 export const PROVIDER_TIMEOUT_MS=60000;
 export type ReasoningEffort=typeof REASONING_EFFORTS[number];
-export type ModelConfig={provider:'modal'|'sail'|'fireworks';model:string;apiKey:string;baseUrl?:string;temperature?:number;maxTokens?:number;prompt?:string;reasoningEffort?:ReasoningEffort;};
-// Record the effort actually sent to the provider.
+export type ModelConfig={provider:'modal'|'sail'|'fireworks';model:string;apiKey:string;baseUrl?:string;temperature?:number;maxTokens?:number;prompt?:string;reasoningEffort?:ReasoningEffort;
+ // Set by the server from the registered agent, never from client input: adds the plan and standing-strategy tools.
+ strategyTools?:boolean;};
+// Sail and Fireworks expose OpenAI-style reasoning_effort; Modal endpoints receive no reasoning parameter, so the recorded value is null there.
 export function effectiveReasoningEffort(config:ModelConfig|undefined){return config&&config.provider!=='modal'&&config.reasoningEffort?config.reasoningEffort:null;}
 export function endpoint(config:ModelConfig){
  if(!['modal','sail','fireworks'].includes(config.provider))throw new ArenaError('Choose Modal, Sail Research, or Fireworks.');
@@ -51,6 +53,12 @@ export class ProviderReplyError extends ArenaError {
  constructor(cause:ArenaError,usage:TokenUsage){super(cause.message,cause.status);this.usage=usage;}
 }
 
+// Provider-specific request fields. Fireworks shortens an over-long prompt by default; ask for an error instead so the
+// conversation is never silently truncated.
+function providerOptions(config:ModelConfig,maxTokens:number){
+ const effort=effectiveReasoningEffort(config);
+ return {...(config.provider==='sail'?{max_completion_tokens:maxTokens,metadata:{completion_window:'asap'}}:{max_tokens:maxTokens}),...(config.provider==='fireworks'?{context_length_exceeded_behavior:'error'}:{}),...(effort?{reasoning_effort:effort}:{})};
+}
 async function requestCompletion(config:ModelConfig,messages:ChatMessage[],timeoutMs:number,fetcher:typeof fetch=fetch,rules?:object,sessionAffinity?:string){
  const url=endpoint(config),temperature=config.temperature??0.3,maxTokens=config.maxTokens??512;
  if(!Number.isFinite(temperature)||temperature<0||temperature>2)throw new ArenaError('Temperature must be 0–2.');
@@ -61,13 +69,19 @@ async function requestCompletion(config:ModelConfig,messages:ChatMessage[],timeo
  const headers:Record<string,string>={'Content-Type':'application/json'};
  if(config.apiKey.trim())headers.Authorization='Bearer '+config.apiKey.trim();
  if(config.provider==='fireworks'&&sessionAffinity)headers['x-session-affinity']=sessionAffinity;
- try{response=await fetcher(url,{method:'POST',redirect:'manual',headers,body:JSON.stringify({model:config.model.trim(),messages:[{role:'system',content:systemPrompt(rules)+(config.prompt?'\nYour strategy: '+config.prompt:'')},...messages],tools:MODEL_TOOLS,tool_choice:'auto',parallel_tool_calls:true,temperature,...(config.provider==='sail'?{max_completion_tokens:maxTokens,metadata:{completion_window:'asap'}}:{max_tokens:maxTokens}),...(effectiveReasoningEffort(config)?{reasoning_effort:config.reasoningEffort}:{}),stream:false}),signal:AbortSignal.timeout(Math.max(100,Math.min(PROVIDER_TIMEOUT_MS,timeoutMs)))});}catch(error){
+ try{response=await fetcher(url,{method:'POST',redirect:'manual',headers,body:JSON.stringify({model:config.model.trim(),messages:[{role:'system',content:systemPrompt(rules,config.strategyTools)+(config.prompt?'\nYour strategy: '+config.prompt:'')},...messages],tools:modelTools(config.strategyTools),tool_choice:'auto',parallel_tool_calls:true,temperature,...providerOptions(config,maxTokens),stream:false}),signal:AbortSignal.timeout(Math.max(100,Math.min(PROVIDER_TIMEOUT_MS,timeoutMs)))});}catch(error){
   const detail=error instanceof Error?(config.apiKey?error.message.replaceAll(config.apiKey,'[redacted]'):error.message).slice(0,300):'Unknown transport error';
   console.error('Provider transport failure',{provider:config.provider,name:error instanceof Error?error.name:'Unknown',detail});
   throw new ArenaError(error instanceof Error&&/abort|timeout/i.test(error.name+' '+error.message)?'Provider timed out. The game clock keeps running.':'Could not reach the provider. Check the endpoint and its deployment.',502);}
- if(!response.ok&&response.status===400){const detail=await response.text();if(/context_length_exceeded|exceeds.*context|exceeds safe limit|maximum context/i.test(detail))throw new ArenaError('Provider context window exceeded. The full conversation is retained; choose a model with a larger context window.',502);}
- if(!response.ok)throw new ArenaError(`Provider HTTP ${response.status}. ${response.status===401||response.status===403?'Check the API key and model permissions.':response.status===429?'Provider rate limit or quota reached.':'Check the model ID, endpoint, and tool-calling support.'}`,502);
- const text=await response.text();if(text.length>256000)throw new ArenaError('Provider response is too large.',502);
+ // The body can arrive long after the headers, so the same timeout can fire while it is being read.
+ let text:string;try{text=await response.text();}catch(error){throw new ArenaError(error instanceof Error&&/abort|timeout/i.test(error.name+' '+error.message)?'Provider timed out. The game clock keeps running.':'The provider connection dropped before the reply was complete.',502);}
+ if(!response.ok&&response.status===400&&/context_length_exceeded|exceeds.*context|exceeds safe limit|maximum context/i.test(text))throw new ArenaError('Provider context window exceeded. The full conversation is retained; choose a model with a larger context window.',502);
+ if(!response.ok){
+  // The provider's own explanation is the fastest way to diagnose a rejected request; the key is never echoed back.
+  const said=(config.apiKey.trim()?text.replaceAll(config.apiKey.trim(),'[redacted]'):text).replace(/\s+/g,' ').trim().slice(0,200);
+  throw new ArenaError(`Provider HTTP ${response.status}. ${response.status===401||response.status===403?'Check the API key and model permissions.':response.status===429?'Provider rate limit or quota reached.':'Check the model ID, endpoint, and tool-calling support.'}${said?' Provider said: '+said:''}`,502);
+ }
+ if(text.length>256000)throw new ArenaError('Provider response is too large.',502);
  let data:any;try{data=JSON.parse(text);}catch{throw new ArenaError('The provider did not return JSON.',502);}
  return {data,latencyMs:Date.now()-started,usage:responseUsage(data,response.headers,config.provider)};
 }

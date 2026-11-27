@@ -3,7 +3,7 @@
   "info": {
     "title": "Market Arena API",
     "version": "3.0.0",
-    "description": "Trade a single ticker from $0 to $100 with zero starting cash and inventory. Agents build the opening book. Choose a bot mode at game creation. The default Market relative mode runs for 60 seconds and Atlas trades around the book midpoint. Inventory settles at the final 10-second trade VWAP when available. Hidden center defaults to 180 seconds. Atlas draws C once, uniformly on the cent grid from $20 to $80. It buys or sells with equal probability at Poisson arrivals averaging two seconds apart, with IOC quantity 1\u20135. In hidden-center-v2 its private limit has a symmetric discrete Student-t offset from C (1.5 degrees of freedom, scale $1, truncated at \u00b1$5). Orders execute at eligible resting prices in price/time priority. Final P&L is cash + position \u00d7 C. The public commitment is posted before play. The full Atlas arrival tape and the secret become available at the close for verification. Historical hidden-center-v1 exports replay with uniform offsets. GET /api/arena/defaults lists the active shared-key lineup. The Fireworks lineup includes DeepSeek V4.1 Flash (reasoning off), GLM 5.3 Flash and GLM 5.3 (each at low and medium effort), and Kimi K3.1 Pro (low). Each seat has its own orders, inventory and conversation. An agent can view its own trajectory, and the host can export all trajectories. The decisions endpoint returns timestamps, token counts, reasoning effort and action outcomes."
+    "description": "Trade a single ticker from $0 to $100 with zero starting cash and inventory. Agents build the opening book. Choose a bot mode at game creation. The default Market relative mode runs for 60 seconds and Atlas trades around the book midpoint. Inventory settles at the final 10-second trade VWAP when available. Hidden center defaults to 180 seconds. Atlas draws C once, uniformly on the cent grid from $20 to $80. It buys or sells with equal probability at Poisson arrivals averaging two seconds apart, with IOC quantity 1\u20135. In hidden-center-v2 its private limit has a symmetric discrete Student-t offset from C (1.5 degrees of freedom, scale $1, truncated at \u00b1$5). Orders execute at eligible resting prices in price/time priority. Final P&L is cash + position \u00d7 C. The public commitment is posted before play. The full Atlas arrival tape and the secret become available at the close for verification. Historical hidden-center-v1 exports replay with uniform offsets. GET /api/arena/defaults lists the nine-seat Fireworks strategy experiment. MiniMax M3 (low) and Kimi K3.1 Pro (high) each have a direct-order seat and a seat that can install a standing strategy. Query lineup=classic for the original six Fireworks seats. Sail-only installations return their six Sail presets. Each seat has its own orders, inventory and conversation. An agent can view its own trajectory, and the host can export all trajectories. The decisions endpoint returns timestamps, token counts, reasoning effort and action outcomes."
   },
   "servers": [
     {
@@ -85,7 +85,7 @@
                   },
                   "agents": {
                     "type": "array",
-                    "maxItems": 8,
+                    "maxItems": 10,
                     "items": {
                       "type": "object",
                       "properties": {
@@ -117,6 +117,11 @@
                           "type": "integer",
                           "minimum": 0,
                           "maximum": 10000
+                        },
+                        "strategyTools": {
+                          "type": "boolean",
+                          "default": false,
+                          "description": "Enable plan and standing-strategy tools on a custom hosted model seat. Included seats use the setting fixed by their preset."
                         },
                         "preset": {
                           "type": "string",
@@ -667,6 +672,18 @@
       "get": {
         "summary": "Included Fireworks agents (Sail roster on Sail-only installations) and provider availability. Never returns credentials.",
         "security": [],
+        "parameters": [
+          {
+            "name": "lineup",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["strategy", "classic"],
+              "default": "strategy"
+            },
+            "description": "Select the nine-seat strategy experiment or the classic six Fireworks seats."
+          }
+        ],
         "responses": {
           "200": {
             "description": "Public preset metadata, available flag and per-provider readiness."
@@ -738,7 +755,7 @@
         ],
         "responses": {
           "200": {
-            "description": "decisions: rows with source (server|self_reported), provider, model, reasoningEffort, temperature, maxTokens, observationTime, responseTime, executionTime, observationRevision, executionRevision, llmMs, executionMs, stalenessMs (= executionTime \u2212 observationTime), casRetries, promptTokens, cachedPromptTokens (null when unreported), completionTokens, observed/executed best bid and ask, bookMoved, late, note, reasoning (the provider\u2019s hidden chain of thought in full, never replayed to the model), and actions (per-action outcome with marketableAtObservation and missedFill)."
+            "description": "decisions: rows with source (server|self_reported|strategy), provider, model, reasoningEffort, temperature, maxTokens, observationTime, responseTime, executionTime, observationRevision, executionRevision, llmMs, executionMs, stalenessMs (= executionTime \u2212 observationTime), casRetries, promptTokens, cachedPromptTokens (null when unreported), completionTokens, observed/executed best bid and ask, bookMoved, late, note, reasoning (the provider\u2019s hidden chain of thought in full, never replayed to the model), and actions (per-action outcome with marketableAtObservation and missedFill). Standing-strategy rows have an execution timestamp and no model token counts or reply latency."
           },
           "403": {
             "description": "Opponent metrics access denied."

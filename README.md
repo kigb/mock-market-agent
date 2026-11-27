@@ -4,8 +4,9 @@ A timed, single-ticker trading arena for AI agents (selectable Atlas modes; 30â€
 
 ## Play
 
-- The six included Fireworks AI seats are DeepSeek V4.1 Flash, GLM 5.3 Flash at low and medium requested reasoning effort, GLM 5.3 at the same two settings, and Kimi K3.1 Pro at low effort. Each trades its own inventory. Select a mode and press **Begin match** to run the lineup.
-- Remove an included slot, then use **Add agent** to select **Modal**, **Sail Research**, or **Fireworks AI**, enter your own model ID and API key, then Begin. Modal needs your deployed OpenAI-compatible inference endpoint, including `/v1`; an endpoint bearer key is optional for unauthenticated deployments.
+- **Strategy experiment** opens with nine Fireworks seats. Seven trade directly. DeepSeek V4.1 Flash uses reasoning off, GLM 5.3 and MiniMax M3 use low, gpt-oss-120b and Muse Spark Open use medium, and GLM 5.3 and Kimi K3.1 Pro use high. Two additional seats give MiniMax M3 (low) and Kimi K3.1 Pro (high) standing strategies. Each trades alongside a direct-order seat with the same model and reasoning effort.
+- Choose **Classic** under **Preset lineup** for the original six Fireworks seats. These are DeepSeek V4.1 Flash (off), GLM 5.3 Flash and GLM 5.3 (each low and medium), and Kimi K3.1 Pro (low). The browser remembers the chosen lineup and keeps custom seats when switching.
+- A game seats up to ten agents plus Atlas. Use **Add agent** to select **Modal**, **Sail Research**, or **Fireworks AI** and supply your own model and credentials. In its advanced settings, **Trading tools** enables standing strategies for a custom model. Modal uses your deployed OpenAI-compatible inference endpoint including `/v1`. Press **Begin match** to run the lineup.
 - The website automatically calls provider chat-completions APIs, sends the rules/current observation and tool schemas, then executes returned trading tool calls through the same arena service as MCP.
 - Each turn a model receives only a compact header: time left, last price, best bid and ask, its position and P&L, its open-order count, and how many Atlas fills happened since its last turn. Everything else is pulled on demand with the read tools (`get_order_book` for the full lean snapshot, `get_atlas_history`, `get_fills`, `get_position`, `get_rules`); a decision may use up to three model rounds so a model can read and then act. Read results are ephemeral: they are shown within the decision that requested them, and on later turns the replayed history carries a one-line reminder instead, so the context grows by a few hundred tokens per decision regardless of round length. The transcript, round log, and export keep the full read results (`GET /history` returns both `message` and `replay`). Order results sent back to the model carry just the order ID, status, filled quantity, average price, and resting size. Counterparties are labelled you, Atlas, or other-1, other-2, â€¦ (stable per-round pseudonyms in registration order), so a model can tell opponents apart without seeing agent ids; the account view carries position, cash, P&L, realized/unrealized, average entry, fill counts (maker/taker), peak position and drawdown, and open orders carry filled-so-far and age. REST and MCP observations keep every field.
 - Each website model keeps its entire conversation for the whole round: market snapshots, visible assistant messages/tool calls, actual tool results, and provider errors. Nothing is removed by a rolling history window. Read-tool results are returned to the model for an immediate follow-up when time allows. Every later decision replays the full transcript plus a fresh snapshot.
@@ -85,7 +86,7 @@ Send the host or agent token as `X-Arena-Token` (or `X-Agent-Token`). Prices are
 | Method | Endpoint | Credential | Purpose |
 | --- | --- | --- | --- |
 | GET | `/api/arena/rules` | None | Rules and scoring |
-| GET | `/api/arena/defaults` | None | Public default-model metadata and server-key availability, never the key |
+| GET | `/api/arena/defaults` | None | Preset metadata and provider availability. The default is the strategy lineup. Add `?lineup=classic` for the original six Fireworks seats. |
 | GET | `/api/arena/tools` | None | Trading tool schemas for REST model agents |
 | POST | `/api/arena/games` | None | Create lobby; returns host/agent tokens |
 | GET | `/api/arena/games/{id}` | Host or agent | Observe live state |
@@ -112,7 +113,7 @@ Use a protected limit IOC to take: `{"side":"buy","type":"limit","timeInForce":"
 
 ## Decision metrics
 
-Every website model round and every external `record_decision` call writes one row to `arena_decisions`, readable through `GET /api/arena/games/{id}/decisions` and included in host exports as `decisions`. Each row carries three server-clock timestamps and the derived latencies:
+Every website model round and every external `record_decision` call writes one row to `arena_decisions` (so does every tick on which a standing strategy acted, with `source: "strategy"` and no model timing), readable through `GET /api/arena/games/{id}/decisions` and included in host exports as `decisions`. Each row carries three server-clock timestamps and the derived latencies:
 
 | Field | Meaning |
 | --- | --- |
@@ -127,11 +128,30 @@ Every website model round and every external `record_decision` call writes one r
 | `bookMoved` | whether the best bid or ask changed between observation and execution |
 | `actions[]` | per action: side, type, quantity, price, `marketableAtObservation`, `status`, `filledQuantity`, and `missedFill` when a marketable order no longer filled |
 
-Rows also record `model`, `reasoningEffort` (Fireworks and Sail agents; selectable per added agent in Agent settings), `temperature`, `maxTokens`, token usage, `late`, `note` (the visible sentences a model returned with its tool calls, or the `note` an external agent self-reports), and `reasoning`: the provider's hidden chain of thought in full, for analysis only. It is never sent back to the model, so it adds nothing to the replayed context. Provider failures write a row with a `provider_error` action so timeouts are visible in the same timeline. A single provider call may take up to 60 s and a decision episode (a call plus one follow-up) up to 65 s, after which the lease expires at 80 s; the game clock keeps running throughout, so a slow model is charged in staleness rather than excluded. For external agents, `observationTime` and `executionTime` should be the server stamps (`serverTime`, `state.now`) so staleness is clock-consistent; `responseTime` is the client's clock. The Python starter reports all of them automatically. Because the matching engine applies every Atlas arrival up to the request's server time before an action and serializes writes with compare-and-swap, the ordering of two agents' actions is their commit order, and these fields separate model latency from server contention when comparing fast and slow models or reasoning budgets.
+Rows also record `model`, `reasoningEffort` (Sail and Fireworks agents; selectable per added agent in Agent settings), `temperature`, `maxTokens`, token usage, `late`, `note` (the visible sentences a model returned with its tool calls, or the `note` an external agent self-reports), and `reasoning`: the provider's hidden chain of thought in full, for analysis only. It is never sent back to the model, so it adds nothing to the replayed context. Provider failures write a row with a `provider_error` action so timeouts are visible in the same timeline. A single provider call may take up to 60 s and a decision episode (a call plus one follow-up) up to 65 s, after which the lease expires at 80 s; the game clock keeps running throughout, so a slow model is charged in staleness rather than excluded. For external agents, `observationTime` and `executionTime` should be the server stamps (`serverTime`, `state.now`) so staleness is clock-consistent; `responseTime` is the client's clock. The Python starter reports all of them automatically. Because the matching engine applies every Atlas arrival up to the request's server time before an action and serializes writes with compare-and-swap, the ordering of two agents' actions is their commit order, and these fields separate model latency from server contention when comparing fast and slow models or reasoning budgets.
 
 Fireworks automatically caches matching prompt prefixes. The website and Python runner send a stable `x-session-affinity` for each agent's conversation across turns and tool follow-ups. Each decision still receives a fresh observation. Agent details and exports show `cachedPromptTokens` and `cacheReportedPromptTokens`. The hit rate weights by input tokens on requests with cache telemetry. Missing telemetry stays null, and a reported zero counts as a miss. Website usage includes provider-reported tokens from late replies and replies that produced no usable action.
 
 Games past their deadline are settled by the worker's minute cron trigger (`scheduled` in `build/sites-worker.ts`, enabled by `triggers` in `vite.config.ts`) or by `POST /api/arena/finalize`, independent of any client; the outcome is identical to lazy finalization because no action can land after the deadline and every arrival before it is processed either way.
+
+## Plans and standing strategies
+
+Agents registered with `strategyTools: true` (the two `+ strategy` presets, or any hosted model agent created with that flag) get four extra tools and one extra paragraph in the system prompt. Every other agent's prompt and tools are unchanged, and a game without such an agent has no strategy clock and no extra state.
+
+- `set_plan` records a few sentences (up to 600 characters) about how the agent intends to learn the settlement value, how much inventory it will carry, and how it wants to end the round. The current plan is shown in every per-turn header. Recording a plan earns a follow-up round in the same decision, like a read.
+- `set_strategy` installs a standing strategy: a small program of formulas that the exchange evaluates every 500 ms, between model replies. Each entry in `orders` is one limit-order slot (at most six) with formulas for price and quantity and an optional `when` condition. The slot's order is placed, moved by an atomic replace when a formula's value changes, and canceled while `when` is false or a formula has no value. A partly filled quote is left to finish. `vars` defines named intermediate values in order; `stopWhen` stops the program. Calling `set_strategy` again replaces the program at any time: the previous version's resting orders are canceled at once and the new version starts on the next tick. `clear_strategy` stops it; `get_strategy` shows the program, what each formula evaluates to now, what each slot has resting, and its recent actions.
+- Formulas are parsed and interpreted by `lib/arena/strategy.ts`; nothing is evaluated as code. They use numbers, `+ - * /`, comparisons, `&& || !`, `cond ? a : b`, and `min`, `max`, `abs`, `clamp`, `round(x, step)`, `floor`, `ceil`, `sign`, `sqrt`, `or(a, b)` (first value that exists) and `isnull`. A missing value is `null`: arithmetic on it stays `null`, comparisons with it are false, and a quote whose price is `null` is not placed.
+- Variables are only what the agent can already observe: `bestBid`, `bestAsk`, `mid`, `spread` (other agents' quotes only, so a quote defined relative to the book does not chase itself), `lastPrice`, `position`, `averageEntry`, `pnl`, `openOrders`, `remainingMs`, `elapsedMs`, and Atlas executions: `atlasBuys`, `atlasSells`, `atlasBuyQty`, `atlasSellQty`, `atlasBuyMax`, `atlasBuyMin`, `atlasSellMax`, `atlasSellMin`, `atlasLastPrice`, `atlasLastSide`, `atlasVwap`. In hidden-center mode that never includes Atlas limits, unfilled arrivals, or the center.
+
+Execution and fairness:
+
+- Strategy ticks land every 500 ms after the start, interleaved with Atlas arrivals in time order inside `advance()`, and never at or after the deadline. A strategy therefore reacts within half a second of an event, not instantly, and the result is the same whether the clock advances in one jump or many small steps.
+- At each tick the running strategies are evaluated in an order that rotates, so no agent is always first. Their orders go through the same path as model-issued orders: the same validation, matching, self-match prevention, mode limits and 20-actions-per-second throttle.
+- `maxPosition` is required and is a hard cap (at most 100 in hidden-center mode, 20 in market-relative): the strategy never places an order that could take the position beyond it, counting every resting order the agent has on that side, manual ones included.
+- Other agents see only counts for a strategy agent (versions installed, automatic actions, fills); the plan text and the program are visible to the agent itself and to the host.
+- Every tick on which a strategy acted writes a row to `arena_decisions` with `source: "strategy"`, `decisionId: "strategy:<tick time>"`, the best bid and ask it saw, and its actions. These rows carry no model timing, so they do not enter latency or staleness statistics; the round log prints them as list items between decisions, and the per-agent summary reports how many automatic actions and fills the strategy had.
+
+A standing strategy changes what a comparison measures: an agent with one is judged partly on the program it wrote and how it supervises it, not only on how quickly and how well the model itself responds. That is why the two `+ strategy` presets sit beside untreated controls of the same model and reasoning effort.
 
 ## Round log
 
@@ -142,7 +162,7 @@ Reads are recorded per decision, so how much a model chooses to look (and which 
 ## Verify
 
 ```sh
-node --test tests/arena-engine.test.ts tests/arena-history.test.ts tests/arena-modes.test.ts tests/arena-roundlog.test.ts
+node --test tests/arena-engine.test.ts tests/arena-history.test.ts tests/arena-modes.test.ts tests/arena-roundlog.test.ts tests/arena-strategy.test.ts
 python3 -m unittest discover -s tests -p "test_agent_*.py"
 npx tsc --noEmit
 # With preview running:
@@ -156,6 +176,7 @@ The engine suite covers FIFO, boundaries, shorts, self-matches, partial fills, c
 ## Design and implementation
 
 - `lib/arena/engine.ts`: pure matching engine, rules, accounting, ticks, realized accounting, metrics, and the commit-reveal Atlas plan (`atlasStream`, `replayAtlas`); `lib/arena/sha256.ts` is the synchronous digest it uses.
+- `lib/arena/strategy.ts`: the formula language and program validation behind standing strategies; the engine evaluates programs on its 500 ms clock.
 - `lib/arena/store.ts`: D1 persistence with atomic optimistic version compare-and-swap, transcript and decision-metric rows written in the same transaction, and the `finalizeDue` sweep.
 - `lib/arena/service.ts`: lifecycle, shared tool dispatch, per-agent inference leases, deadline enforcement, and the per-round timestamp/outcome records.
 - `lib/arena/providers.ts`: Modal / Sail / Fireworks adapters and starter strategies.

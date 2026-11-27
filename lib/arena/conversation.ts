@@ -25,7 +25,9 @@ export type ChatMessage={role:'user'|'assistant'|'tool';content:string|null;tool
 export type Completion={message:ChatMessage;calls:{id:string;intent:Intent}[];reasoning?:string;latencyMs:number;usage:TokenUsage};
 // replay: when set, this is what the model sees on later turns instead of the stored message (ephemeral read results).
 export type TranscriptEntry={id:number;time:number;decisionId:string;step:number;message:ChatMessage;replay?:ChatMessage|null};
-export const READ_TOOLS=new Set(['get_rules','get_order_book','get_position','get_atlas_history','get_fills']);
+export const READ_TOOLS=new Set(['get_rules','get_order_book','get_position','get_atlas_history','get_fills','get_strategy']);
+// Tools after which the model gets a follow-up round in the same decision: reads, and recording a plan.
+export const FOLLOW_UP_TOOLS=new Set([...READ_TOOLS,'set_plan']);
 export type PartyLabels=Map<string,string>;
 // Stable pseudonyms for the other agents this round (other-1, other-2, … in registration order): the model can tell
 // opponents apart and count them without ever seeing an agent id. Atlas and the agent itself keep their names.
@@ -34,36 +36,53 @@ export const labelParty=(id:unknown,me:unknown,others?:PartyLabels)=>id==='$atla
 export const labelTicks=(ticks:any[],me:unknown,others?:PartyLabels)=>ticks.map(t=>Array.isArray(t.executions)?{...t,executions:t.executions.map((x:any)=>({...x,maker:labelParty(x.maker,me,others)}))}:t);
 // The trading view of the account: what a market maker needs to manage inventory and notice adverse selection.
 export const leanPosition=(p:any)=>({position:p.position,cash:p.cash,pnl:p.pnl,realizedPnl:p.realizedPnl,unrealizedPnl:p.unrealizedPnl,averageEntry:p.averageEntry,fills:p.fills,makerFills:p.makerFills,takerFills:p.takerFills,peakPosition:p.peakPosition,maxDrawdown:p.maxDrawdown});
-export const leanOrders=(orders:any[],serverTime:number)=>orders.map(x=>({id:x.id,side:x.side,price:x.price,quantity:x.quantity,filled:typeof x.originalQuantity==='number'?x.originalQuantity-x.quantity:0,ageMs:typeof x.time==='number'&&typeof serverTime==='number'?Math.max(0,serverTime-x.time):null}));
+export const leanOrders=(orders:any[],serverTime:number)=>orders.map(x=>({id:x.id,side:x.side,price:x.price,quantity:x.quantity,filled:typeof x.originalQuantity==='number'?x.originalQuantity-x.quantity:0,ageMs:typeof x.time==='number'&&typeof serverTime==='number'?Math.max(0,serverTime-x.time):null,...(x.auto?{placedBy:'strategy v'+x.auto}:{})}));
 // The per-turn header: the minimum every decision needs. Everything else is pulled through the read tools.
 export function headerSnapshot(o:any,sinceTime:number){
  const ticks:any[]=Array.isArray(o?.atlas?.ticks)?o.atlas.ticks:[],filled=ticks.filter(t=>t.filledQuantity>0);
- return {serverTime:o.serverTime,remainingMs:o.remainingMs,lastPrice:o.lastPrice??null,bestBid:o.book?.bestBid??null,bestAsk:o.book?.bestAsk??null,position:o.position?.position??0,pnl:o.position?.pnl??0,openOrders:Array.isArray(o.openOrders)?o.openOrders.length:0,atlasFillsSinceLastTurn:filled.filter(t=>t.time>sinceTime).length,atlasFillsTotal:filled.length};
+ return {serverTime:o.serverTime,remainingMs:o.remainingMs,lastPrice:o.lastPrice??null,bestBid:o.book?.bestBid??null,bestAsk:o.book?.bestAsk??null,position:o.position?.position??0,pnl:o.position?.pnl??0,openOrders:Array.isArray(o.openOrders)?o.openOrders.length:0,atlasFillsSinceLastTurn:filled.filter(t=>t.time>sinceTime).length,atlasFillsTotal:filled.length,
+  // Agents with plan and strategy tools also see their current plan and what their standing strategy has done.
+  ...(o&&'strategy' in o?{plan:o.plan??null,strategy:o.strategy??null}:{})};
 }
 // One-line stand-in for a read result on later turns; the full result stays in the transcript for logs and exports.
 export function readSummary(action:string,result:any){
  const n=(v:unknown)=>Array.isArray(v)?v.length:0;
- const text=action==='get_order_book'?`Viewed the order book (${n(result?.book?.bids)+n(result?.book?.asks)} levels), your ${n(result?.openOrders)} open orders, position, recent fills and ${n(result?.atlas?.ticks)} Atlas executions`:action==='get_atlas_history'?`Viewed ${n(result?.ticks)} Atlas executions`:action==='get_fills'?`Viewed ${n(result?.fills)} recent fills`:action==='get_position'?`Viewed your position and ${n(result?.openOrders)} open orders`:'Viewed the rules';
+ const text=action==='get_order_book'?`Viewed the order book (${n(result?.book?.bids)+n(result?.book?.asks)} levels), your ${n(result?.openOrders)} open orders, position, recent fills and ${n(result?.atlas?.ticks)} Atlas executions`:action==='get_atlas_history'?`Viewed ${n(result?.ticks)} Atlas executions`:action==='get_fills'?`Viewed ${n(result?.fills)} recent fills`:action==='get_position'?`Viewed your position and ${n(result?.openOrders)} open orders`:action==='get_strategy'?'Viewed your plan and standing strategy':'Viewed the rules';
  return {ephemeral:true,note:text+' on that turn; call the tool again for current data.'};
 }
 export function replayView(entries:TranscriptEntry[]):ChatMessage[]{return entries.map(e=>e.replay??e.message);}
+// Some providers return the chain of thought inline as <think>…</think> (the opening tag can be missing, and the block
+// is unterminated when the token budget ran out). Split it off so it is recorded for analysis but never replayed.
+export function splitInlineThinking(content:string){
+ const thoughts:string[]=[];let text=content;const close=text.indexOf('</think>'),open=text.indexOf('<think>');
+ if(close>=0&&(open<0||open>close))text='<think>'+text;
+ text=text.replace(/<think>([\s\S]*?)(?:<\/think>|$)/g,(_all,thought:string)=>{if(thought.trim())thoughts.push(thought.trim());return '';}).trim();
+ return {text,thinking:thoughts.join('\n\n')};
+}
 export function normalizeCompletion(data:any):Pick<Completion,'message'|'calls'|'reasoning'>{
  const m=data?.choices?.[0]?.message;if(!m)throw new ArenaError('The provider returned no completion message.');
- const hidden=[m.reasoning_content,m.reasoning,m.thinking].find(v=>typeof v==='string'&&v.trim());const reasoning=typeof hidden==='string'?hidden.trim().slice(0,100000):undefined;
+ const inline=typeof m.content==='string'&&/<\/?think>/.test(m.content)?splitInlineThinking(m.content):null,content:string|null=inline?inline.text:typeof m.content==='string'?m.content:null;
+ const hidden=[m.reasoning_content,m.reasoning,m.thinking,inline?.thinking].find(v=>typeof v==='string'&&v.trim());const reasoning=typeof hidden==='string'?hidden.trim().slice(0,100000):undefined;
  let toolCalls:ToolCall[]=[];
  if(Array.isArray(m.tool_calls)&&m.tool_calls.length){
   if(m.tool_calls.length>16)throw new ArenaError('The model returned too many tool calls.');
   const used=new Set<string>();
   toolCalls=m.tool_calls.map((t:any)=>{let id=typeof t.id==='string'&&t.id.length<=200?t.id:'call_'+crypto.randomUUID();if(used.has(id))id='call_'+crypto.randomUUID();used.add(id);return {id,type:'function',function:{name:String(t.function?.name||''),arguments:typeof t.function?.arguments==='string'?t.function.arguments:'{}'}};});
- }else if(typeof m.content==='string'&&m.content.trim()){
-  const raw=m.content.trim().replace(/^```(?:json)?\s*/,'').replace(/\s*```$/,'');let decoded:any;
+ }else if(content&&content.trim()){
+  const raw=content.trim().replace(/^```(?:json)?\s*/,'').replace(/\s*```$/,'');let decoded:any;
   try{decoded=JSON.parse(raw);}catch{/* Visible prose is a completed turn. */}
   const list=Array.isArray(decoded)?decoded:Array.isArray(decoded?.actions)?decoded.actions:decoded&&(decoded.action||decoded.name)?[decoded]:[];
   if(list.length>16)throw new ArenaError('The model returned too many actions.');
   toolCalls=list.map((item:any)=>{const {action,name,...args}=item;return {id:'call_'+crypto.randomUUID(),type:'function',function:{name:action||name,arguments:JSON.stringify(args)}};});
  }else throw new ArenaError('The model produced no trading decision (possibly exhausted its token budget).');
- const calls=toolCalls.map(t=>{let args:any;try{args=JSON.parse(t.function.arguments);}catch{return {id:t.id,intent:{action:'invalid_tool_arguments'} as unknown as Intent};}if(!args||typeof args!=='object'||Array.isArray(args))return {id:t.id,intent:{action:'invalid_tool_arguments'} as unknown as Intent};return {id:t.id,intent:{...args,action:t.function.name} as Intent};});
- return {message:{role:'assistant',content:typeof m.content==='string'?m.content:null,...(toolCalls.length?{tool_calls:toolCalls}:{})},calls,...(reasoning?{reasoning}:{})};
+ // A tool call whose arguments are not a JSON object must not be stored as returned: this message is replayed on every
+ // later request, and providers reject the whole request (HTTP 400) when a past tool call carries invalid JSON. The
+ // stored call keeps its name with empty arguments; the raw text goes back to the model in the tool result instead.
+ const calls=toolCalls.map(t=>{let args:any;try{args=JSON.parse(t.function.arguments);}catch{args=undefined;}
+  if(!args||typeof args!=='object'||Array.isArray(args)){const raw=t.function.arguments.slice(0,300);t.function.arguments='{}';if(!t.function.name)t.function.name='unknown_tool';return {id:t.id,intent:{action:'invalid_tool_arguments',reason:raw} as unknown as Intent};}
+  if(!t.function.name){t.function.name='unknown_tool';return {id:t.id,intent:{action:'invalid_tool_arguments',reason:'the tool call had no name'} as unknown as Intent};}
+  return {id:t.id,intent:{...args,action:t.function.name} as Intent};});
+ return {message:{role:'assistant',content,...(toolCalls.length?{tool_calls:toolCalls}:{})},calls,...(reasoning?{reasoning}:{})};
 }
 export function scriptedCompletion(actions:Intent[]):Completion{return {...normalizeCompletion({choices:[{message:{content:JSON.stringify(actions)}}]}),latencyMs:0,usage:{promptTokens:0,completionTokens:0}};}
 export function redactMessage(message:ChatMessage,secrets:string[]):ChatMessage{function visit(value:any,key=''):any{if(typeof value==='string'){if(key==='role'||key==='type')return value;for(const secret of secrets)if(secret)value=value.replaceAll(secret,'[redacted]');return value;}if(Array.isArray(value))return value.map(v=>visit(v));if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).map(([k,v])=>[k,visit(v,k)]));return value;}return visit(message);}
@@ -79,7 +98,7 @@ export async function converse(options:{messages:ChatMessage[];deadline:number;i
   const reply=options.interleavedReasoning && completion.reasoning
    ? {...completion.message,reasoning_content:completion.reasoning} : completion.message;
   rounds++;messages.push(reply,...result.replies);late=!!result.late;
-  if(late||!completion.calls.length||completion.calls.some(c=>!READ_TOOLS.has(c.intent.action)))break;
+  if(late||!completion.calls.length||completion.calls.some(c=>!FOLLOW_UP_TOOLS.has(c.intent.action)))break;
  }
  return {rounds,late};
 }

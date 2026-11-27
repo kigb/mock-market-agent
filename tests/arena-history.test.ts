@@ -86,7 +86,7 @@ test('the per-turn header is minimal, read results are ephemeral on replay, and 
  intent(g,g.agents[1],{action:'place_order',side:'sell',type:'limit',quantity:3,price:40},2001);intent(g,g.agents[0],{action:'place_order',side:'buy',type:'limit',quantity:2,price:39},2002);
  const o:any=observation(g,g.agents[0],5000);o.atlas.ticks=[{time:3000,side:'buy',filledQuantity:2,averageFillPrice:40,executions:[]},{time:4500,side:'sell',filledQuantity:1,averageFillPrice:39,executions:[]}];
  const h=headerSnapshot(o,3500);assert.deepEqual(h,{serverTime:5000,remainingMs:177000,lastPrice:null,bestBid:39,bestAsk:40,position:0,pnl:0,openOrders:1,atlasFillsSinceLastTurn:1,atlasFillsTotal:2});assert.ok(JSON.stringify(h).length<220);
- assert.deepEqual([...READ_TOOLS].sort(),['get_atlas_history','get_fills','get_order_book','get_position','get_rules']);
+ assert.deepEqual([...READ_TOOLS].sort(),['get_atlas_history','get_fills','get_order_book','get_position','get_rules','get_strategy']);
  const summary=readSummary('get_atlas_history',{total:40,ticks:[{},{},{}]});assert.equal(summary.ephemeral,true);assert.match(summary.note,/Viewed 3 Atlas executions/);assert.match(readSummary('get_order_book',leanSnapshot(o)).note,/order book \(2 levels\), your 1 open orders/);
  const entries:TranscriptEntry[]=[{id:1,time:1,decisionId:'d',step:0,message:{role:'user',content:'{}'}},{id:2,time:2,decisionId:'d',step:1,message:{role:'assistant',content:null,tool_calls:[tool('r','get_fills',{}) as any]}},{id:3,time:3,decisionId:'d',step:2,message:{role:'tool',tool_call_id:'r',content:'{"fills":[1,2,3]}'},replay:{role:'tool',tool_call_id:'r',content:'{"ephemeral":true}'}},{id:4,time:4,decisionId:'d',step:3,message:{role:'tool',tool_call_id:'x',content:'{"orderId":"ord_1"}'},replay:null}];
  const replayed=replayView(entries);assert.equal(replayed[2].content,'{"ephemeral":true}');assert.equal(replayed[2].tool_call_id,'r','tool linkage survives');assert.equal(replayed[3].content,'{"orderId":"ord_1"}');assert.equal(entries[2].message.content,'{"fills":[1,2,3]}','the transcript keeps the data');
@@ -106,7 +106,17 @@ test('tool IDs survive replay, duplicate IDs are repaired, and visible prose end
  assert.equal(parsed.reasoning,'Hidden reasoning stays out of the replayed history.');assert.ok(!JSON.stringify(parsed.message).includes('Hidden reasoning'));
  assert.equal(normalizeCompletion({choices:[{message:{content:'Plain.',reasoning:'alt field'}}]}).reasoning,'alt field');assert.equal(normalizeCompletion({choices:[{message:{content:'Plain.',reasoning_content:'   '}}]}).reasoning,undefined);
  assert.equal(normalizeCompletion({choices:[{message:{content:'No additional action this turn.'}}]}).calls.length,0);
+ // Providers that return the chain of thought inline: it is split off the same way, with or without an opening tag.
+ const inline=normalizeCompletion({choices:[{message:{content:'<think>Atlas sold twice; C is below 50.</think>\nQuoting lower.',tool_calls:[tool('q','get_position',{})]}}]});
+ assert.equal(inline.reasoning,'Atlas sold twice; C is below 50.');assert.equal(inline.message.content,'Quoting lower.');assert.ok(!JSON.stringify(inline.message).includes('Atlas sold twice'));
+ const headless=normalizeCompletion({choices:[{message:{content:'thinking without an opening tag</think>{"action":"wait"}'}}]});
+ assert.equal(headless.reasoning,'thinking without an opening tag');assert.equal(headless.calls[0].intent.action,'wait');
+ assert.throws(()=>normalizeCompletion({choices:[{message:{content:'<think>ran out of budget mid-thought'}}]}),/no trading decision/);
+ assert.equal(normalizeCompletion({choices:[{message:{content:'<think>inline</think>Visible.',reasoning_content:'separate field wins'}}]}).reasoning,'separate field wins');
  const bad=normalizeCompletion({choices:[{message:{tool_calls:[{id:'invalid',function:{name:'place_order',arguments:'{broken'}}]}}]});assert.equal(bad.calls[0].id,'invalid');assert.equal(bad.calls[0].intent.action,'invalid_tool_arguments');
+ // The malformed text is never stored in the replayed message (a provider would reject every later request); it is handed back in the tool result.
+ assert.equal(bad.message.tool_calls![0].function.arguments,'{}');assert.equal(bad.message.tool_calls![0].function.name,'place_order');assert.equal((bad.calls[0].intent as any).reason,'{broken');
+ for(const args of ['[1,2]','"text"','{"price": 84, "side": "buy','']){const m=normalizeCompletion({choices:[{message:{tool_calls:[{id:'x',function:{name:'place_order',arguments:args}},{id:'y',function:{name:'',arguments:'{}'}}]}}]});assert.deepEqual(m.message.tool_calls!.map(c=>[c.function.name,JSON.parse(c.function.arguments)]),[['place_order',{}],['unknown_tool',{}]]);assert.deepEqual(m.calls.map(c=>c.intent.action),['invalid_tool_arguments','invalid_tool_arguments']);}
 });
 test('information loops stop at the three-round cap and never start inference past the deadline',async()=>{
  let calls=0,commits=0;
