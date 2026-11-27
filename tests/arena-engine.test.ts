@@ -36,18 +36,22 @@ test('baseline strategies create genuine liquidity and trade through normal inte
 test('2,000 randomized orders preserve cash, inventory, and book invariants',()=>{const g=createGame('g','h','o',Array.from({length:4},(_,i)=>({name:'Agent'+i,provider:'external' as const})),1000,42,undefined,60_000);startGame(g,2000);let seed=19;const rand=()=>{seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed/2**32;};for(let i=0;i<2000;i++){const a=g.agents[i%4],now=2001+Math.floor(i/40)*1000;if(now>=62000)break;advance(g,now);intent(g,a,{action:'cancel_all'},now);intent(g,a,{action:'place_order',type:rand()>.2?'limit':'market',side:rand()>.5?'buy':'sell',quantity:1+Math.floor(rand()*10),price:Math.floor(rand()*10001)/100},now);assert.equal(g.agents.reduce((v,a)=>v+a.cash,0),0);assert.equal(g.agents.reduce((v,a)=>v+a.position,0),0);const b=sorted(g,'buy')[0],ask=sorted(g,'sell')[0];if(b&&ask)assert.ok(b.price<ask.price);assert.ok(g.orders.every(o=>o.quantity>0));}});
 test('provider endpoints use verified URLs and reject unsafe Modal targets',()=>{const c={provider:'sail' as const,model:'test',apiKey:'secret'};assert.equal(endpoint(c),'https://api.sailresearch.com/v1/chat/completions');assert.equal(endpoint({...c,provider:'fireworks'}),'https://api.fireworks.ai/inference/v1/chat/completions');assert.equal(endpoint({...c,provider:'modal',baseUrl:'https://my-app.modal.run/v1/'}),'https://my-app.modal.run/v1/chat/completions');for(const u of ['http://my.modal.run/v1','https://localhost/v1','https://my.modal.run.evil.com/v1','https://my.modal.run/v1?token=x','https://user:pass@my.modal.run/v1'])assert.throws(()=>endpoint({...c,provider:'modal',baseUrl:u}));});
 test('model tool calls and JSON fallback parse; malformed output is visible, not silent',()=>{const parsed=parseDecision({choices:[{message:{tool_calls:[{function:{name:'place_order',arguments:'{"side":"buy","type":"limit","quantity":2,"price":49.9}'}}]}}]});assert.equal(parsed[0].action,'place_order');assert.equal(parsed[0].quantity,2);assert.equal(parseDecision({choices:[{message:{content:'```json\n{"action":"wait"}\n```'}}]})[0].action,'wait');assert.throws(()=>parseDecision({choices:[{message:{content:'I will buy!'}}]}));});
-test('provider integration fixture checks auth, tools, usage and safe errors without paid calls',async()=>{const g=fixture(),a=g.agents[0],seen:any[]=[];const mock:typeof fetch=async(url,init)=>{seen.push({url,init});return Response.json({choices:[{message:{tool_calls:[{function:{name:'wait',arguments:'{}'}}]}}],usage:{prompt_tokens:42,completion_tokens:8}});};const c={provider:'sail' as const,model:'fixture-model',apiKey:'FAKE_KEY_FOR_TEST'};const out=await infer(c,observation(g,a,2001),1000,mock);assert.equal(out.actions[0].action,'wait');assert.equal(out.usage.promptTokens,42);assert.equal(seen[0].init.headers.Authorization,'Bearer FAKE_KEY_FOR_TEST');assert.ok(seen[0].init.body.includes('tools'));assert.ok(seen[0].init.body.includes('a limit price uniformly within C ± 5.00'),'the Atlas mechanism is stated in the rules');assert.equal((JSON.parse(seen[0].init.body).messages[0].content.match(/\"bot\":/g)||[]).length,1,'and only once in the system prompt');assert.ok(seen[0].init.body.includes('market_relative'));assert.ok(!seen[0].init.body.includes(a.token));await assert.rejects(()=>infer(c,{},1000,async()=>new Response('do not leak FAKE_KEY_FOR_TEST',{status:401})),(e:any)=>e.status===502&&!e.message.includes('FAKE_KEY_FOR_TEST'));});
+test('provider integration fixture checks auth, tools, usage and safe errors without paid calls',async()=>{const g=fixture(),a=g.agents[0],seen:any[]=[];const mock:typeof fetch=async(url,init)=>{seen.push({url,init});return Response.json({choices:[{message:{tool_calls:[{function:{name:'wait',arguments:'{}'}}]}}],usage:{prompt_tokens:42,completion_tokens:8}});};const c={provider:'sail' as const,model:'fixture-model',apiKey:'FAKE_KEY_FOR_TEST'};const out=await infer(c,observation(g,a,2001),1000,mock);assert.equal(out.actions[0].action,'wait');assert.equal(out.usage.promptTokens,42);assert.equal(seen[0].init.headers.Authorization,'Bearer FAKE_KEY_FOR_TEST');assert.ok(seen[0].init.body.includes('tools'));assert.ok(seen[0].init.body.includes('symmetric discrete Student-t offset'),'the Atlas mechanism is stated in the rules');assert.equal((JSON.parse(seen[0].init.body).messages[0].content.match(/\"bot\":/g)||[]).length,1,'and only once in the system prompt');assert.ok(seen[0].init.body.includes('market_relative'));assert.ok(!seen[0].init.body.includes(a.token));await assert.rejects(()=>infer(c,{},1000,async()=>new Response('do not leak FAKE_KEY_FOR_TEST',{status:401})),(e:any)=>e.status===502&&!e.message.includes('FAKE_KEY_FOR_TEST'));});
 
 test('six provided presets span speeds with one large-model control, pin models and intervals, reject duplicates and exclude credentials',async()=>{
- const {DEFAULT_AGENTS}=await import('../lib/arena/presets.ts');
+ const {DEFAULT_AGENTS,SAIL_AGENTS,providedLineup}=await import('../lib/arena/presets.ts');
  assert.equal(DEFAULT_AGENTS.length,6);assert.ok(!DEFAULT_AGENTS.some(a=>/gemma/i.test(a.model)),'no Gemma slots');
  const specs=DEFAULT_AGENTS.map(a=>({...a}));
  const g=createGame('preset-fixture','host','',specs,1000);
  assert.equal(g.agents.filter(a=>a.preset).length,6);
  assert.equal(new Set(g.agents.filter(a=>a.preset).map(a=>a.model)).size,4);
- assert.deepEqual(DEFAULT_AGENTS.filter(a=>/GLM-5\.3$|Kimi|Pro/.test(a.model)).map(a=>a.preset),['sail-glm-low','sail-glm-medium','sail-deepseek-pro'],'large-model controls');assert.deepEqual(DEFAULT_AGENTS.filter(a=>a.model==='zai-org/GLM-5.3').map(a=>a.reasoningEffort),['low','medium']);
- assert.ok(!DEFAULT_AGENTS.some(a=>a.model.startsWith('zai-org/')&&a.reasoningEffort==='none'),'Sail rejects reasoning_effort none for GLM');
- assert.deepEqual(DEFAULT_AGENTS.filter(a=>a.model==='zai-org/GLM-5.3-Flash').map(a=>a.reasoningEffort),['low','medium']);
+ assert.equal(providedLineup(true,true).agents,DEFAULT_AGENTS);
+ assert.equal(providedLineup(false,true).agents,SAIL_AGENTS);
+ assert.equal(providedLineup(false,false).available,false);
+ assert.ok(DEFAULT_AGENTS.every(a=>a.provider==='fireworks'&&a.model.startsWith('accounts/fireworks/')));
+ assert.deepEqual(DEFAULT_AGENTS.filter(a=>a.model.endsWith('/glm-5p3')).map(a=>a.reasoningEffort),['low','medium']);
+ assert.deepEqual(DEFAULT_AGENTS.filter(a=>a.model.endsWith('/glm-5p3-flash')).map(a=>a.reasoningEffort),['low','medium']);
+ assert.equal(createGame('old-sail','host','',SAIL_AGENTS,1000).agents[0].provider,'sail');
  for(const p of DEFAULT_AGENTS){
   assert.equal(g.agents.find(a=>a.preset===p.preset)?.intervalMs,0);
   assert.throws(()=>createGame('x','h','',[{...p,model:'arbitrary-model'}],1000));
@@ -135,10 +139,36 @@ test('schema-4 midpoint rounds retain best-only Atlas, their old random sequence
 
 // Schema 7: random limit IOC Atlas around a hidden center C drawn from a committed 256-bit secret, settled at C.
 const SECRET='00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff',OTHER='ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100';
-function fixture7(secret=SECRET,seed=42){const g=createGame('game_00000000-0000-0000-0000-000000000000','host','owner',[{name:'Alice',provider:'external'},{name:'Bob',provider:'external'}],1000,seed,secret,60_000);startGame(g,2000);return g;}
+test('hidden-center v2 changes only limit offsets and replays a symmetric, center-concentrated law',async()=>{
+ const {studentTOffset}=await import('../lib/arena/atlas-offset.ts');
+ const g=createGame('student','host','',[{name:'Trader',provider:'external'}],1000,42,SECRET,60000);
+ startGame(g,2000);
+ const v1=replayAtlas(42,SECRET,2000,62000);
+ const v2=replayAtlas(42,SECRET,2000,62000,'hidden-center-v2');
+ assert.equal(g.schema,9);
+ assert.equal(Reflect.get(publicState(g,2000).rules,'rulesVersion'),'hidden-center-v2');
+ assert.deepEqual(g.atlasPlan,v2.plan);
+ assert.equal(v1.center,v2.center);
+ const timesAndSizes=(plan:typeof v2.plan)=>plan.map(p=>[p.time,p.side,p.quantity]);
+ assert.deepEqual(timesAndSizes(v1.plan),timesAndSizes(v2.plan));
+ assert.notDeepEqual(v1.plan.map(p=>p.limit),v2.plan.map(p=>p.limit));
+ assert.equal(studentTOffset(0),-500);
+ assert.equal(studentTOffset(1-2**-32),500);
+ assert.equal(studentTOffset(.5),0);
+ let near=0,far=0;
+ for(let i=0;i<10000;i++){
+  const u=(i+.5)/10000,k=studentTOffset(u);
+  assert.equal(k+studentTOffset(1-u),0);
+  if(Math.abs(k)<=100)near++;
+  if(Math.abs(k)>=300)far++;
+ }
+ assert.ok(near>5880 && near<5910);
+ assert.ok(far>720 && far<750);
+});
+function fixture7(secret=SECRET,seed=42){const g=createGame('game_00000000-0000-0000-0000-000000000000','host','owner',[{name:'Alice',provider:'external'},{name:'Bob',provider:'external'}],1000,seed,secret,60_000);g.schema=7;startGame(g,2000);return g;}
 // Historical schema-6 rounds: an LCG stream seeded by the public seed and a secret 32-bit nonce, no commitment.
 function fixture6(nonce=7){const g=createGame('game_00000000-0000-0000-0000-000000000000','host','owner',[{name:'Alice',provider:'external'},{name:'Bob',provider:'external'}],1000,42,undefined,60_000);g.schema=6;g.atlasNonce=nonce;delete g.atlasSecret;delete g.atlasCommitment;startGame(g,2000);return g;}
-test('hidden-center games use schema 7 with a committed secret and a reproducible Poisson plan inside the center band',()=>{
+test('archived hidden-center games use schema 7 with a committed secret and a reproducible Poisson plan inside the center band',()=>{
  const g=fixture7(),h=fixture7(),other=fixture7(OTHER),reseeded=fixture7(SECRET,43);assert.equal(g.schema,7);assert.deepEqual(g.atlasPlan,h.atlasPlan);assert.equal(g.atlasCenter,h.atlasCenter);assert.notDeepEqual(g.atlasPlan,other.atlasPlan);assert.notDeepEqual(g.atlasPlan,reseeded.atlasPlan);
  assert.equal(g.atlasCommitment,atlasCommitment(SECRET));assert.equal(g.atlasCommitment,createHash('sha256').update(Buffer.from(SECRET,'hex')).digest('hex'));assert.equal(g.atlasNonce,undefined);
  const c=g.atlasCenter!,plan=g.atlasPlan!;assert.ok(c>=2000&&c<=8000);assert.ok(plan.length>=10&&plan.length<=60,`arrivals ${plan.length}`);
@@ -224,7 +254,7 @@ test('rounds default to 180 seconds, accept 30–600 s per game, scale call budg
  assert.match(g.events.at(-1)!.message,/180 seconds/);
  place(g,0,'buy',1000,.01);advance(g,181999);assert.equal(g.status,'running');advance(g,182000);assert.equal(g.status,'finished');assert.equal(g.finishedAt,182000);
  assert.ok(g.atlasPlan!.every(p=>p.time<182000));assert.ok(g.atlasPlan!.length>50&&g.atlasPlan!.length<180,`arrivals ${g.atlasPlan!.length}`);assert.equal(g.botAttempts,g.atlasPlan!.length);
- assert.deepEqual(replayAtlas(g.seed,g.atlasSecret!,g.startedAt!,g.endsAt!).plan,g.atlasPlan);
+ assert.deepEqual(replayAtlas(g.seed,g.atlasSecret!,g.startedAt!,g.endsAt!,'hidden-center-v2').plan,g.atlasPlan);
  const short=createGame('x','h','',[{name:'A',provider:'external'}],1000,42,undefined,30000);startGame(short,2000);assert.equal(short.endsAt,32000);assert.equal(observation(short,short.agents[0],2001).rules.durationSeconds,30);
  assert.equal(RULES.durationSeconds,180);assert.deepEqual(RULES.durationRange,[30,600]);
  for(const bad of [29000,601000,90500,1.5,NaN,'180' as unknown as number])assert.throws(()=>createGame('x','h','',[],1000,42,undefined,bad),/Round length/);

@@ -7,10 +7,10 @@ const SECRET='01'.repeat(32);
 function fixture(){const g=createGame('modes','host','',[{name:'A',provider:'external'},{name:'B',provider:'external'},{name:'C',provider:'external'}],1000,42,SECRET);startGame(g,2000);g.atlasPlan=[];return g;}
 function place(g:Game,i:number,side:'buy'|'sell',q:number,p:number,now=2001,extras:Partial<Intent>={}){return intent(g,g.agents[i],{action:'place_order',side,quantity:q,price:p,...extras},now) as any;}
 function fill(g:Game,price:number,q:number,time:number){place(g,0,'sell',q,price,time);place(g,1,'buy',q,price,time);}
-test('public default selects market-relative rules; hidden-center mode and historical schema-7 remain explicit and unchanged',()=>{
+test('public default selects market-relative rules; hidden-center mode and new hidden-center rounds use their versioned offset law',()=>{
  const g=fixture();assert.equal(DEFAULT_BOT_MODE,'market_relative');assert.equal(BOT_MODES.length,2);assert.equal(g.schema,8);assert.equal(g.durationMs,60000);assert.equal(g.atlasCenter,undefined);assert.equal(g.atlasCommitment,atlasCommitment(SECRET));
  const r=rulesFor(g);assert.equal(Reflect.get(r,'botMode'),'market_relative');assert.equal(r.scoringMode,'market_vwap');assert.equal(r.botCenterRange,null);assert.deepEqual(r.quantityRange,[1,20]);assert.equal(publicState(g,2001).botIntervalMs,1000);
- const old=createGame('old','host','',[],1000,42,SECRET,undefined,'hidden_center');assert.equal(old.schema,7);assert.equal(old.durationMs,180000);assert.equal(rulesFor(old).scoringMode,'hidden_center');assert.equal(modeRules().botMode,'market_relative');assert.throws(()=>modeRules('invalid'));assert.throws(()=>createGame('x','h','',[],0,42,SECRET,60000,'nope' as any));
+ const old=createGame('old','host','',[],1000,42,SECRET,undefined,'hidden_center');assert.equal(old.schema,9);assert.equal(old.durationMs,180000);assert.equal(rulesFor(old).scoringMode,'hidden_center');assert.equal(modeRules().botMode,'market_relative');assert.throws(()=>modeRules('invalid'));assert.throws(()=>createGame('x','h','',[],0,42,SECRET,60000,'nope' as any));
 });
 test('independent relative streams reproduce arrivals without a center or action-dependent randomness',()=>{
  const a=replayRelativeAtlas(42,SECRET,2000,62000),b=replayRelativeAtlas(42,SECRET,2000,62000);assert.deepEqual(a,b);assert.notDeepEqual(a,replayRelativeAtlas(43,SECRET,2000,62000));assert.ok(a.plan.length>25&&a.plan.length<100);

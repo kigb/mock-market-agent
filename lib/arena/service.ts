@@ -108,12 +108,17 @@ export async function decision(id:string,token:string,config:ModelConfig|undefin
   return applied.result;
  };
  try{
-  if(claim.result.preset){const p=defaultAgent(claim.result.preset);if(!p||!env.SAIL_API_KEY)throw new ArenaError('The arena’s default Sail agents are unavailable. Add an agent with your own provider key.',503);config={provider:'sail',model:p.model,apiKey:env.SAIL_API_KEY,temperature:.3,maxTokens:p.maxTokens??DEFAULT_MAX_TOKENS,prompt:DEFAULT_STRATEGY,reasoningEffort:p.reasoningEffort};}
+  if(claim.result.preset){
+   const p=defaultAgent(claim.result.preset);
+   const key=p?.provider==='fireworks'?env.FIREWORKS_API_KEY:env.SAIL_API_KEY;
+   if(!p||!key)throw new ArenaError('This included agent has no configured provider access.',503);
+   config={provider:p.provider,model:p.model,apiKey:key,temperature:.3,maxTokens:p.maxTokens??DEFAULT_MAX_TOKENS,prompt:DEFAULT_STRATEGY,reasoningEffort:p.reasoningEffort};
+  }
   if(claim.result.actions){if(await beforeCall())await commit(scriptedCompletion(claim.result.actions));}
   else{
    const messages=await replayMessages(id,agentId);
    const rules=claim.result.rules;
-   await converse({messages,deadline,beforeCall,complete:async(history,remaining)=>{inferenceStarted=Date.now();const outcome=await complete(config!,history,remaining,undefined,rules);respondedAt=Date.now();return outcome;},commit});
+   await converse({messages,deadline,interleavedReasoning:config?.provider==='fireworks',beforeCall,complete:async(history,remaining)=>{inferenceStarted=Date.now();const outcome=await complete(config!,history,remaining,undefined,rules);respondedAt=Date.now();return outcome;},commit});
   }
   const released=await change(id,(g)=>{const a=agentAuth(g,token);if(a.leaseId===leaseId){a.leaseId='';a.leaseUntil=0;}return {modelRounds:totalRounds,toolCalls:totalActions,historyMessages:a.historyMessages??0};});return released;
  }catch(error){

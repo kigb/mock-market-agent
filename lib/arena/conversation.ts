@@ -19,9 +19,8 @@ export function leanToolResult<T extends {ok:boolean;result?:any}>(entry:T,other
  return entry;
 }
 export type ToolCall={id:string;type:'function';function:{name:string;arguments:string}};
-export type ChatMessage={role:'user'|'assistant'|'tool';content:string|null;tool_calls?:ToolCall[];tool_call_id?:string};
-// reasoning is the provider's hidden chain of thought (reasoning_content). It is kept for analysis only: never replayed
-// to the model and never stored in the conversation.
+export type ChatMessage={role:'user'|'assistant'|'tool';content:string|null;tool_calls?:ToolCall[];tool_call_id?:string;reasoning_content?:string};
+// Reasoning stays outside the saved conversation. Fireworks can reuse it in memory for tool follow-ups in this decision.
 export type Completion={message:ChatMessage;calls:{id:string;intent:Intent}[];reasoning?:string;latencyMs:number;usage:{promptTokens:number;completionTokens:number}};
 // replay: when set, this is what the model sees on later turns instead of the stored message (ephemeral read results).
 export type TranscriptEntry={id:number;time:number;decisionId:string;step:number;message:ChatMessage;replay?:ChatMessage|null};
@@ -68,7 +67,7 @@ export function normalizeCompletion(data:any):Pick<Completion,'message'|'calls'|
 export function scriptedCompletion(actions:Intent[]):Completion{return {...normalizeCompletion({choices:[{message:{content:JSON.stringify(actions)}}]}),latencyMs:0,usage:{promptTokens:0,completionTokens:0}};}
 export function redactMessage(message:ChatMessage,secrets:string[]):ChatMessage{function visit(value:any,key=''):any{if(typeof value==='string'){if(key==='role'||key==='type')return value;for(const secret of secrets)if(secret)value=value.replaceAll(secret,'[redacted]');return value;}if(Array.isArray(value))return value.map(v=>visit(v));if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).map(([k,v])=>[k,visit(v,k)]));return value;}return visit(message);}
 // Keep every prior message. A read-only tool turn may immediately lead to a trading turn.
-export async function converse(options:{messages:ChatMessage[];deadline:number;now?:()=>number;beforeCall:(round:number)=>Promise<boolean>;complete:(messages:ChatMessage[],remainingMs:number)=>Promise<Completion>;commit:(completion:Completion,round:number)=>Promise<{replies:ChatMessage[];late?:boolean}>}){
+export async function converse(options:{messages:ChatMessage[];deadline:number;interleavedReasoning?:boolean;now?:()=>number;beforeCall:(round:number)=>Promise<boolean>;complete:(messages:ChatMessage[],remainingMs:number)=>Promise<Completion>;commit:(completion:Completion,round:number)=>Promise<{replies:ChatMessage[];late?:boolean}>}){
  // No per-decision action cap: the parser's 16 calls per reply, the three-round limit, and the engine's per-second throttle
  // and open-order limit are the only bounds, so a model that reads before acting is not short of actions afterwards.
  const now=options.now??Date.now,messages=[...options.messages];let rounds=0,late=false;
@@ -76,7 +75,9 @@ export async function converse(options:{messages:ChatMessage[];deadline:number;n
   if(!await options.beforeCall(round))break;
   const remaining=options.deadline-now();if(remaining<=0)break;
   const completion=await options.complete(messages,remaining),result=await options.commit(completion,round);
-  rounds++;messages.push(completion.message,...result.replies);late=!!result.late;
+  const reply=options.interleavedReasoning && completion.reasoning
+   ? {...completion.message,reasoning_content:completion.reasoning} : completion.message;
+  rounds++;messages.push(reply,...result.replies);late=!!result.late;
   if(late||!completion.calls.length||completion.calls.some(c=>!READ_TOOLS.has(c.intent.action)))break;
  }
  return {rounds,late};

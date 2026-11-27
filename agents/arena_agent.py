@@ -451,8 +451,8 @@ class ModelAgent(BaseAgent):
     def __init__(self, *args, provider: str, model: str, api_key: str, base_url: str = '',
                  temperature: float = .3, max_tokens: int = 512, prompt: str = '', reasoning_effort: str = '', **kwargs):
         super().__init__(*args, **kwargs)
-        # Sail accepts OpenAI-style reasoning_effort (none/low/medium/high); it is recorded with every decision.
-        self.reasoning_effort = reasoning_effort if provider == 'sail' else ''
+        # Record reasoning effort only for providers that receive the parameter.
+        self.reasoning_effort = reasoning_effort if provider in ('sail', 'fireworks') else ''
         endpoints = {'fireworks': 'https://api.fireworks.ai/inference/v1',
                      'sail': 'https://api.sailresearch.com/v1', 'modal': base_url}
         if provider not in endpoints or not endpoints[provider]:
@@ -466,6 +466,7 @@ class ModelAgent(BaseAgent):
         self.pending_calls: list[dict] = []
         # Ephemeral reads: index in history -> one-line reminder replayed on later turns instead of the data.
         self.replay_overrides: dict[int, dict] = {}
+        self.turn_reasoning: dict[int, str] = {}
         self.turn_start = 0
         self.last_turn_time = 0
         # Other agents' ids -> other-N, assigned on first appearance and stable for the round.
@@ -519,6 +520,7 @@ class ModelAgent(BaseAgent):
     def infer(self, o: dict, fresh: bool) -> list[dict]:
         if fresh:
             # Only the compact header enters history; the model pulls details with the read tools.
+            self.turn_reasoning.clear()
             self.turn_start = len(self.history)
             self.remember({'role': 'user', 'content': json.dumps(header_snapshot(o, self.last_turn_time))})
             self.last_turn_time = o.get('serverTime') or self.last_turn_time
@@ -531,6 +533,8 @@ class ModelAgent(BaseAgent):
                   'Begin every reply with one or two plain sentences saying what you see and why you act (they are logged), then call the tools in the same reply. Use the provided tool contract and server action-rate bounds. All prices are dollars. Supply quotes when needed. Read the public Atlas mechanism: the exact arrival, price protection, quantity, and settlement rules for this game. Rules: '
                   + json.dumps(o.get('rules', self.rules)) + '\nStrategy: ' + self.prompt)
         replayed = [self.replay_overrides.get(i, m) if i < self.turn_start else m for i, m in enumerate(self.history)]
+        for index, reasoning in self.turn_reasoning.items():
+            replayed[index] = {**replayed[index], 'reasoning_content': reasoning}
         payload = {'model': self.model, 'messages': [{'role': 'system', 'content': system}, *replayed],
                    'tools': self.model_tools, 'tool_choice': 'auto', 'temperature': self.temperature, 'stream': False}
         payload['max_completion_tokens' if self.provider == 'sail' else 'max_tokens'] = self.max_tokens
@@ -590,6 +594,8 @@ class ModelAgent(BaseAgent):
         assistant = {'role': 'assistant', 'content': message.get('content')}
         if normalized:
             assistant['tool_calls'] = normalized
+        if self.provider == 'fireworks' and self.last_reasoning:
+            self.turn_reasoning[len(self.history)] = self.last_reasoning
         self.remember(assistant)
         self.pending_calls = normalized
         return actions

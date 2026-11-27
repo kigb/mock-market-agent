@@ -56,7 +56,7 @@ export async function change<T>(id:string,fn:(g:Game,now:number,journal:Journal,
 
 // Atomic shared-key allowance, independent of game count and client tokens.
 export async function reserveDefaultCall(now=Date.now()){
- const day=new Date(now).toISOString().slice(0,10),configured=Number(env.SAIL_DEFAULT_DAILY_CALL_LIMIT),limit=Number.isInteger(configured)&&configured>0&&configured<=100000?configured:3000;
+ const day=new Date(now).toISOString().slice(0,10),configured=Number(env.ARENA_DEFAULT_DAILY_CALL_LIMIT ?? env.SAIL_DEFAULT_DAILY_CALL_LIMIT),limit=Number.isInteger(configured)&&configured>0&&configured<=100000?configured:3000;
  const row=await db().prepare('INSERT INTO arena_default_usage (day,calls) VALUES (?,1) ON CONFLICT(day) DO UPDATE SET calls=calls+1 WHERE calls<? RETURNING calls').bind(day,limit).first<{calls:number}>();
  if(!row)throw new ArenaError('The arena-provided agents have reached today’s shared allowance. Add an agent with your own provider key, or try tomorrow.',429);
 }

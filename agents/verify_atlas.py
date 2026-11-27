@@ -8,6 +8,8 @@ arrival from SHA-256(secret || seed || counter), and compares them with the reve
 Standard library only. The TypeScript engine (lib/arena/engine.ts, replayAtlas) is the reference;
 this is a second implementation so the arena operator is not the only party who can replay a game.
 """
+from bisect import bisect_right
+from itertools import accumulate
 import hashlib
 import json
 import math
@@ -35,7 +37,13 @@ def uniform_stream(secret: bytes, seed: int):
         for i in range(8):
             yield struct.unpack('>I', digest[i*4:i*4+4])[0] / 4294967296
 
-def replay(seed: int, secret_hex: str, started_at: int, ends_at: int):
+def replay(seed: int, secret_hex: str, started_at: int, ends_at: int, version='hidden-center-v1'):
+    if version not in ('hidden-center-v1', 'hidden-center-v2'):
+        raise ValueError(f'Unknown hidden-center rules version: {version}')
+    weights = []
+    if version == 'hidden-center-v2':
+        weights = list(accumulate(js_round(1_000_000 * (1 + (k / 100)**2 / 1.5)**-1.25)
+                                  for k in range(-LIMIT_BAND_CENTS, LIMIT_BAND_CENTS + 1)))
     draw = uniform_stream(bytes.fromhex(secret_hex), seed).__next__
     low, high = CENTER_RANGE_CENTS
     center = low + math.floor(draw() * (high - low + 1))
@@ -44,8 +52,12 @@ def replay(seed: int, secret_hex: str, started_at: int, ends_at: int):
         t += max(1, js_round(-math.log(1 - draw()) * MEAN_INTERVAL_MS))
         if t >= ends_at:
             break
-        plan.append({'time': t, 'side': 'buy' if draw() < .5 else 'sell', 'quantity': 1 + math.floor(draw() * 5),
-                     'limit': center + js_round((draw() * 2 - 1) * LIMIT_BAND_CENTS)})
+        side = 'buy' if draw() < .5 else 'sell'
+        quantity = 1 + math.floor(draw() * 5)
+        u = draw()
+        offset = (bisect_right(weights, math.floor(u * weights[-1])) - LIMIT_BAND_CENTS
+                  if weights else js_round((u * 2 - 1) * LIMIT_BAND_CENTS))
+        plan.append({'time': t, 'side': side, 'quantity': quantity, 'limit': center + offset})
     return center, plan
 
 def replay_relative(seed, secret_hex, started_at, ends_at):
@@ -106,7 +118,11 @@ def verify(report: dict) -> bool:
                     return False
         print(f'Relative plan OK: {len(plan)} arrivals, sizes, distances and recorded book-based limits match; no hidden center. Full price/FIFO verification also needs the ordered action log.')
         return ok
-    center, plan = replay(state['seed'], secret, state['startedAt'], state['endsAt'])
+    version = (state.get('rules') or {}).get('rulesVersion', 'hidden-center-v1')
+    if version not in ('hidden-center-v1', 'hidden-center-v2'):
+        print(f'UNKNOWN HIDDEN-CENTER RULES VERSION: {version}')
+        return False
+    center, plan = replay(state['seed'], secret, state['startedAt'], state['endsAt'], version)
     if abs(center / 100 - atlas['center']) > 1e-9:
         print(f'CENTER MISMATCH: replayed {center/100:.2f}, revealed {atlas["center"]}')
         ok = False

@@ -6,8 +6,8 @@ export const REASONING_EFFORTS=['none','low','medium','high'] as const;
 export const PROVIDER_TIMEOUT_MS=60000;
 export type ReasoningEffort=typeof REASONING_EFFORTS[number];
 export type ModelConfig={provider:'modal'|'sail'|'fireworks';model:string;apiKey:string;baseUrl?:string;temperature?:number;maxTokens?:number;prompt?:string;reasoningEffort?:ReasoningEffort;};
-// Sail exposes OpenAI-style reasoning_effort; other providers receive no reasoning parameter, so the recorded value is null there.
-export function effectiveReasoningEffort(config:ModelConfig|undefined){return config?.provider==='sail'&&config.reasoningEffort?config.reasoningEffort:null;}
+// Record the effort actually sent to the provider.
+export function effectiveReasoningEffort(config:ModelConfig|undefined){return config&&config.provider!=='modal'&&config.reasoningEffort?config.reasoningEffort:null;}
 export function endpoint(config:ModelConfig){
  if(!['modal','sail','fireworks'].includes(config.provider))throw new ArenaError('Choose Modal, Sail Research, or Fireworks.');
  if(typeof config.apiKey!=='string'||config.apiKey.length>2048||/[\r\n]/.test(config.apiKey))throw new ArenaError('Invalid API key.');
@@ -37,7 +37,7 @@ async function requestCompletion(config:ModelConfig,messages:ChatMessage[],timeo
  if(config.prompt&&config.prompt.length>4000)throw new ArenaError('Strategy prompt must be at most 4,000 characters.');
  if(config.reasoningEffort!==undefined&&config.reasoningEffort!==null&&!REASONING_EFFORTS.includes(config.reasoningEffort))throw new ArenaError('Reasoning effort must be none, low, medium, or high.');
  const started=Date.now();let response:Response;
- try{response=await fetcher(url,{method:'POST',redirect:'manual',headers:{'Content-Type':'application/json',...(config.apiKey.trim()?{Authorization:'Bearer '+config.apiKey.trim()}:{})},body:JSON.stringify({model:config.model.trim(),messages:[{role:'system',content:systemPrompt(rules)+(config.prompt?'\nYour strategy: '+config.prompt:'')},...messages],tools:MODEL_TOOLS,tool_choice:'auto',parallel_tool_calls:true,temperature,...(config.provider==='sail'?{max_completion_tokens:maxTokens,metadata:{completion_window:'asap'},...(config.reasoningEffort?{reasoning_effort:config.reasoningEffort}:{})}:{max_tokens:maxTokens}),stream:false}),signal:AbortSignal.timeout(Math.max(100,Math.min(PROVIDER_TIMEOUT_MS,timeoutMs)))});}catch(error){
+ try{response=await fetcher(url,{method:'POST',redirect:'manual',headers:{'Content-Type':'application/json',...(config.apiKey.trim()?{Authorization:'Bearer '+config.apiKey.trim()}:{})},body:JSON.stringify({model:config.model.trim(),messages:[{role:'system',content:systemPrompt(rules)+(config.prompt?'\nYour strategy: '+config.prompt:'')},...messages],tools:MODEL_TOOLS,tool_choice:'auto',parallel_tool_calls:true,temperature,...(config.provider==='sail'?{max_completion_tokens:maxTokens,metadata:{completion_window:'asap'}}:{max_tokens:maxTokens}),...(effectiveReasoningEffort(config)?{reasoning_effort:config.reasoningEffort}:{}),stream:false}),signal:AbortSignal.timeout(Math.max(100,Math.min(PROVIDER_TIMEOUT_MS,timeoutMs)))});}catch(error){
   const detail=error instanceof Error?(config.apiKey?error.message.replaceAll(config.apiKey,'[redacted]'):error.message).slice(0,300):'Unknown transport error';
   console.error('Provider transport failure',{provider:config.provider,name:error instanceof Error?error.name:'Unknown',detail});
   throw new ArenaError(error instanceof Error&&/abort|timeout/i.test(error.name+' '+error.message)?'Provider timed out. The game clock keeps running.':'Could not reach the provider. Check the endpoint and its deployment.',502);}

@@ -59,6 +59,6 @@ next-env.d.ts
 __pycache__/
 *.pyc
 
-# Local Worker secrets (SAIL_API_KEY for the preview); never commit.
+# Local Worker provider secrets
 .dev.vars
 .dev.vars.*

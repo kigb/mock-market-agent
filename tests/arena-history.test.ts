@@ -88,3 +88,19 @@ test('a provider context limit is explicit and never discards conversation histo
  await assert.rejects(()=>complete(config,messages,1000,async()=>Response.json({error:{code:'context_length_exceeded',message:'input exceeds safe limit'}},{status:400})),(e:Error)=>/full conversation is retained/.test(e.message));
  assert.equal(messages.length,1);assert.equal(messages[0].content,'First observation must remain.');
 });
+
+test('Fireworks reuses reasoning only for an immediate read-tool follow-up', async()=>{
+ const journal:ChatMessage[]=[];
+ const sent:ChatMessage[][]=[];
+ await converse({messages:[],deadline:Date.now()+1000,interleavedReasoning:true,beforeCall:async()=>true,
+  complete:async messages=>{
+   sent.push(structuredClone(messages));
+   const name=sent.length===1?'get_position':'wait';
+   return {...normalizeCompletion({choices:[{message:{content:'Decision',reasoning_content:'round-specific thought',
+    tool_calls:[tool('call-'+sent.length,name,{})]}}]}),latencyMs:1,usage:{promptTokens:1,completionTokens:1}};
+  },
+  commit:async out=>{journal.push(out.message);return {replies:out.calls.map(c=>({role:'tool',tool_call_id:c.id,content:'{}'}))};}
+ });
+ assert.equal(sent[1][0].reasoning_content,'round-specific thought');
+ assert.ok(journal.every(m=>!('reasoning_content' in m)));
+});

@@ -3,7 +3,7 @@
   "info": {
     "title": "Market Arena API",
     "version": "3.0.0",
-    "description": "One ticker, a timed round (180 seconds by default, durationSeconds 30\u2013600 per game), zero initial capital. No opening price; lastPrice is null until first execution. Atlas, the only system bot, arrives at random times (on average every 2 seconds) and buys or sells 1-5 contracts with an immediate-or-cancel limit price drawn within C \u00b1 5, where C is a hidden per-game center between 20 and 80; it matches at normal price priority then FIFO. Final P&L = cash + position \u00d7 C, revealed at the deadline. valuation provides the provisional live midpoint mark (last-executed-price fallback) or the frozen final reference; settlementPrice is final-only. While a round runs, atlas.ticks lists only executions; after the deadline it lists every arrival with its limit price, and atlas.center and atlas.secret are revealed; atlas.commitment = SHA-256(secret) is public from creation so the plan can be replayed and audited (pre-schema-7 rounds expose atlas.nonce instead). Prices are dollars. Realized/unrealized P&L are separate. Host and agent tokens are returned only on creation/registration. Six default Sail agents form a speed ladder: DeepSeek V4.1 Flash (reasoning off), GLM 5.3 Flash and the full GLM 5.3 each at low and medium reasoning, and DeepSeek V4 Pro at low reasoning; each slot has independent orders, inventory, and conversation. Website model agents retain their complete per-game conversation, replay it for each decision, and receive actual tool results. Host exports include trajectories; agent tokens only expose their own transcript. GET /games/{id}/decisions returns per-round decision metrics (observation/response/execution server stamps, staleness, LLM and execution latency, tokens, reasoning effort, book movement, action outcomes). POST /finalize settles games past their deadline without client polling. Model agents receive a compact per-turn header and pull details with read tools (get_order_book, get_atlas_history, get_fills, get_position); read results are ephemeral in the replayed history."
+    "description": "Trade a single ticker from $0 to $100 with zero starting cash and inventory. Agents build the opening book. Choose a bot mode at game creation. The default Market relative mode runs for 60 seconds and Atlas trades around the book midpoint. Inventory settles at the final 10-second trade VWAP when available. Hidden center defaults to 180 seconds. Atlas draws C once, uniformly on the cent grid from $20 to $80. It buys or sells with equal probability at Poisson arrivals averaging two seconds apart, with IOC quantity 1\u20135. In hidden-center-v2 its private limit has a symmetric discrete Student-t offset from C (1.5 degrees of freedom, scale $1, truncated at \u00b1$5). Orders execute at eligible resting prices in price/time priority. Final P&L is cash + position \u00d7 C. The public commitment is posted before play. The full Atlas arrival tape and the secret become available at the close for verification. Historical hidden-center-v1 exports replay with uniform offsets. GET /api/arena/defaults lists the active shared-key lineup. The Fireworks lineup includes DeepSeek V4.1 Flash (reasoning off), GLM 5.3 Flash and GLM 5.3 (each at low and medium effort), and Kimi K3.1 Pro (low). Each seat has its own orders, inventory and conversation. An agent can view its own trajectory, and the host can export all trajectories. The decisions endpoint returns timestamps, token counts, reasoning effort and action outcomes."
   },
   "servers": [
     {
@@ -659,11 +659,11 @@
     },
     "/api/arena/defaults": {
       "get": {
-        "summary": "Six included Sail agents and shared-key availability. Never returns credentials.",
+        "summary": "Included Fireworks agents (Sail roster on Sail-only installations) and provider availability. Never returns credentials.",
         "security": [],
         "responses": {
           "200": {
-            "description": "Public preset metadata and available boolean."
+            "description": "Public preset metadata, available flag and per-provider readiness."
           }
         }
       }

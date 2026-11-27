@@ -26,11 +26,11 @@ def main():
                    help='Round length in seconds, 30–600 (default depends on bot mode).')
     p.add_argument('--interval', type=float, default=0,
                    help='Seconds between decision starts per agent; 0 (default) means as soon as the previous decision lands.')
-    p.add_argument('--provider', choices=['modal', 'sail', 'fireworks'], default='sail')
+    p.add_argument('--provider', choices=['modal', 'sail', 'fireworks'], default='fireworks' if os.getenv('FIREWORKS_API_KEY') else 'sail')
     p.add_argument('--model', default=os.getenv('ARENA_MODEL', ''))
     p.add_argument('--base-url', default=os.getenv('MODAL_BASE_URL', ''))
     p.add_argument('--reasoning-effort', choices=['none', 'low', 'medium', 'high'], default=os.getenv('ARENA_REASONING_EFFORT', ''),
-                   help='Sail reasoning_effort for LLM agents; recorded with every decision for latency/quality comparisons.')
+                   help='Fireworks/Sail reasoning_effort for LLM agents; recorded with every decision for latency/quality comparisons.')
     p.add_argument('--output', default='arena-results.json')
     args = p.parse_args()
     if len(args.agents) > 8:

@@ -2,7 +2,7 @@
 
 Use `python run_match.py --bot-mode market_relative --agents maker momentum` for the default 60-second market-relative game. Use `--bot-mode hidden_center` for the 180-second hidden-value game; `--duration 30` overrides either mode. Provider credentials stay in environment variables. Baselines obey the selected risk bounds and protective market prices; model agents receive the exact per-game rules.
 
-Market-relative Atlas uses current mid ± random 0.01–0.50 tolerance, skips one-sided or >1.00-wide books, and has no hidden center. Inventory settles at the final 10-second trade VWAP with full-round fallback. Hidden-center mode retains C ± 5 and settlement at C. Modes are fixed when the game is created. `verify_atlas.py` supports both replay protocols.
+Market-relative Atlas uses current mid ± random 0.01–0.50 tolerance, skips one-sided or >1.00-wide books, and has no hidden center. Inventory settles at the final 10-second trade VWAP with full-round fallback. New hidden-center rounds draw a Student-t-shaped price offset (1.5 degrees of freedom, scale 1.00, restricted to ±5.00) and settle at C. The verifier also recognizes historical uniform-offset rounds. Modes are fixed when the game is created. `verify_atlas.py` supports both replay protocols.
 
 
 Python 3.10+. Standard library only. Every order and observation uses the shared arena engine through MCP or REST.
@@ -37,7 +37,7 @@ python run_match.py --agents maker llm --provider sail --model "YOUR_MODEL_ID"
 
 # Fireworks
 export FIREWORKS_API_KEY="YOUR_KEY"
-python run_match.py --agents maker llm --provider fireworks --model "accounts/YOUR_ACCOUNT/models/YOUR_MODEL"
+python run_match.py --agents maker llm --provider fireworks --model accounts/fireworks/models/glm-5p3-flash --reasoning-effort low
 
 # Modal: an OpenAI-compatible deployment, not the Modal management API
 export MODAL_ENDPOINT_API_KEY="YOUR_ENDPOINT_BEARER_KEY_IF_REQUIRED"
@@ -90,7 +90,7 @@ Prices are 0–100 in 0.01 ticks, with zero starting cash/inventory and no fees.
 `python verify_atlas.py arena-results.json` verifies the secret commitment and mode-specific draws. For market-relative mode it also checks recorded book-based limits/skips and quantity/price protection. Full FIFO verification needs the ordered exchange action log. Reproducing identical randomness does not guarantee identical prices when actions or timing differ. Atlas advances on committed server events/access and the existing finalization sweep.
 
 
-The six included website agents use the arena’s server-side Sail secret. Added website agents’ provider keys live only in browser memory and individual inference requests. This independent Python client uses its own provider key for model agents. Keep the tab open for website runners. This Python runner runs independently, including when the website is closed. Website hosts can read `GET /api/arena/games/{id}/history?agentId={agentId}` with their host token; agent tokens can read only their own transcript. Website exports contain `trajectories` and `decisions`; `run_match.py` saves both as well, plus a Markdown round log next to the results file (`arena-results.md` by default), and `GET /api/arena/games/{id}/decisions` returns the per-round metrics for your own agents. Results retain bounded recent public fills/events and up to 500 order idempotency receipts. Export results after the game for a local report.
+The included website agents prefer the arena’s server-side Fireworks secret. Sail-only installations use their original Sail roster. Added website agents’ provider keys live only in browser memory and individual inference requests. This independent Python client uses its own provider key for model agents. Keep the tab open for website runners. This Python runner runs independently, including when the website is closed. Website hosts can read `GET /api/arena/games/{id}/history?agentId={agentId}` with their host token; agent tokens can read only their own transcript. Website exports contain `trajectories` and `decisions`; `run_match.py` saves both as well, plus a Markdown round log next to the results file (`arena-results.md` by default), and `GET /api/arena/games/{id}/decisions` returns the per-round metrics for your own agents. Results retain bounded recent public fills/events and up to 500 order idempotency receipts. Export results after the game for a local report.
 
 Provider references:
 
@@ -99,6 +99,6 @@ Provider references:
 - Fireworks: https://docs.fireworks.ai/api-reference/post-chatcompletions
 - MCP: https://modelcontextprotocol.io/specification/2025-06-18/basic/transports
 
-External decision metrics are self-reported and never affect scoring. Website inference latency is measured by the server. Pass `--reasoning-effort none|low|medium|high` to `run_match.py` (Sail only) to compare reasoning budgets; the value is stored with each decision row next to its staleness and latency. Usage covers completions received before the deadline; in-flight responses discarded after the deadline are not included in frozen usage metrics.
+External decision metrics are self-reported and never affect scoring. Website inference latency is measured by the server. Pass `--reasoning-effort none|low|medium|high` to `run_match.py` (Fireworks and Sail) to compare reasoning budgets; the value is stored with each decision row next to its staleness and latency. Usage covers completions received before the deadline; in-flight responses discarded after the deadline are not included in frozen usage metrics.
 
 The client keeps TLS certificate verification enabled. On Python installs without a configured CA file, it loads an existing OS CA bundle; explicit SSL_CERT_FILE/SSL_CERT_DIR settings take precedence. Requests identify the application as MarketArenaAgent/2.0.

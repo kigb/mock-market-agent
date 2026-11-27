@@ -1,12 +1,20 @@
-// Public metadata only. The shared credential is resolved in server code.
-// Six arena-provided Sail agents forming a speed ladder: DeepSeek V4.1 Flash with reasoning off, GLM 5.3 Flash at two
-// reasoning tiers, the full GLM 5.3 at the same two tiers (so size and reasoning budget vary one at a time), and DeepSeek
-// V4 Pro at low reasoning as the slowest large-model control.
-// Sail rejects reasoning_effort "none" for the GLM family (HTTP 400); "low" is its lowest native tier.
-// Use the dated DeepSeek ID: the undated alias timed out on every call, the dated endpoint answers in about a second.
 export type PresetReasoningEffort='none'|'low'|'medium'|'high';
 // maxTokens overrides DEFAULT_MAX_TOKENS for slots whose reasoning tokens would otherwise exhaust the completion budget.
-export const DEFAULT_AGENTS:{preset:string;name:string;provider:'sail';model:string;size:string;intervalMs:number;reasoningEffort?:PresetReasoningEffort;maxTokens?:number}[] = [
+export type ProvidedAgent = {
+ preset:string; name:string; provider:'fireworks'|'sail'; model:string; size:string; intervalMs:number;
+ reasoningEffort?:PresetReasoningEffort; maxTokens?:number;
+};
+export const DEFAULT_AGENTS:ProvidedAgent[] = [
+ {preset:'fw-deepseek',name:'DeepSeek V4.1 Flash',provider:'fireworks',model:'accounts/fireworks/models/deepseek-v4p1-flash-1017',size:'Flash · reasoning off',intervalMs:0,reasoningEffort:'none'},
+ {preset:'fw-glm-flash',name:'GLM 5.3 Flash · low',provider:'fireworks',model:'accounts/fireworks/models/glm-5p3-flash',size:'Flash · reasoning low',intervalMs:0,reasoningEffort:'low'},
+ {preset:'fw-glm-flash-medium',name:'GLM 5.3 Flash · medium',provider:'fireworks',model:'accounts/fireworks/models/glm-5p3-flash',size:'Flash · reasoning medium',intervalMs:0,reasoningEffort:'medium'},
+ {preset:'fw-glm-low',name:'GLM 5.3 · low',provider:'fireworks',model:'accounts/fireworks/models/glm-5p3',size:'Full model · reasoning low',intervalMs:0,reasoningEffort:'low'},
+ {preset:'fw-glm-medium',name:'GLM 5.3 · medium',provider:'fireworks',model:'accounts/fireworks/models/glm-5p3',size:'Full model · reasoning medium',intervalMs:0,reasoningEffort:'medium'},
+ {preset:'fw-kimi-pro',name:'Kimi K3.1 Pro · low',provider:'fireworks',model:'accounts/fireworks/models/kimi-k3p1-pro',size:'Pro · reasoning low',intervalMs:0,reasoningEffort:'low'},
+];
+
+// Retain the original identifiers and configuration for existing Sail games and Sail-only installations.
+export const SAIL_AGENTS:ProvidedAgent[] = [
  {preset:'sail-deepseek',name:'DeepSeek V4.1 Flash',provider:'sail',model:'deepseek-ai/DeepSeek-V4.1-Flash-1017',size:'552B MoE · 16B active · reasoning off',intervalMs:0,reasoningEffort:'none'},
  {preset:'sail-glm-flash',name:'GLM 5.3 Flash · low',provider:'sail',model:'zai-org/GLM-5.3-Flash',size:'321B MoE · 18B active · reasoning low',intervalMs:0,reasoningEffort:'low'},
  {preset:'sail-glm-flash-medium',name:'GLM 5.3 Flash · medium',provider:'sail',model:'zai-org/GLM-5.3-Flash',size:'321B MoE · 18B active · reasoning medium',intervalMs:0,reasoningEffort:'medium'},
@@ -14,7 +22,11 @@ export const DEFAULT_AGENTS:{preset:string;name:string;provider:'sail';model:str
  {preset:'sail-glm-medium',name:'GLM 5.3 · medium',provider:'sail',model:'zai-org/GLM-5.3',size:'753B MoE · 40B active · reasoning medium',intervalMs:0,reasoningEffort:'medium'},
  {preset:'sail-deepseek-pro',name:'DeepSeek V4 Pro · low',provider:'sail',model:'deepseek-ai/DeepSeek-V4-Pro-0813',size:'V4 Pro · large MoE · reasoning low',intervalMs:0,reasoningEffort:'low'},
 ];
-export function defaultAgent(preset:unknown){return DEFAULT_AGENTS.find(a=>a.preset===preset);}
+export function defaultAgent(preset:unknown){return DEFAULT_AGENTS.find(a=>a.preset===preset)??SAIL_AGENTS.find(a=>a.preset===preset);}
+export function providedLineup(fireworks:boolean,sail:boolean) {
+ const agents = fireworks || !sail ? DEFAULT_AGENTS : SAIL_AGENTS;
+ return {agents,available:fireworks||sail,providers:{fireworks,sail}};
+}
 // 4096 so reasoning models can finish thinking and still return tool calls; fast models use well under 1,000.
 export const DEFAULT_MAX_TOKENS=4096;
 // Preset agents are free-running (intervalMs 0). The per-game call cap assumes at most one decision every 2 s plus one
