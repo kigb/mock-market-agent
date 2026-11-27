@@ -11,6 +11,7 @@ import ssl
 import time
 import uuid
 import random
+import re
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from typing import Any
@@ -451,8 +452,8 @@ class ModelAgent(BaseAgent):
     def __init__(self, *args, provider: str, model: str, api_key: str, base_url: str = '',
                  temperature: float = .3, max_tokens: int = 512, prompt: str = '', reasoning_effort: str = '', **kwargs):
         super().__init__(*args, **kwargs)
-        # Sail accepts OpenAI-style reasoning_effort (none/low/medium/high); it is recorded with every decision.
-        self.reasoning_effort = reasoning_effort if provider == 'sail' else ''
+        # Sail and Fireworks accept OpenAI-style reasoning_effort (none/low/medium/high); it is recorded with every decision.
+        self.reasoning_effort = reasoning_effort if provider in ('sail', 'fireworks') else ''
         endpoints = {'fireworks': 'https://api.fireworks.ai/inference/v1',
                      'sail': 'https://api.sailresearch.com/v1', 'modal': base_url}
         if provider not in endpoints or not endpoints[provider]:
@@ -534,6 +535,9 @@ class ModelAgent(BaseAgent):
         payload = {'model': self.model, 'messages': [{'role': 'system', 'content': system}, *replayed],
                    'tools': self.model_tools, 'tool_choice': 'auto', 'temperature': self.temperature, 'stream': False}
         payload['max_completion_tokens' if self.provider == 'sail' else 'max_tokens'] = self.max_tokens
+        if self.provider == 'fireworks':
+            # Fireworks shortens an over-long prompt by default; ask for an error so history is never silently truncated.
+            payload['context_length_exceeded_behavior'] = 'error'
         if self.reasoning_effort:
             payload['reasoning_effort'] = self.reasoning_effort
         timeout = max(.1, min(60, o['remainingMs']/1000,
@@ -551,6 +555,17 @@ class ModelAgent(BaseAgent):
             raise MCPError(f'Model provider HTTP {exc.code}; check key, model, and quota.') from None
         except (URLError, TimeoutError, KeyError) as exc:
             raise MCPError(f'Model request failed: {type(exc).__name__}') from None
+        # Some providers return the chain of thought inline as <think>…</think>; split it off so it is recorded but
+        # never replayed. The opening tag can be missing, and the block is unterminated when the budget ran out.
+        inline_thinking = ''
+        if isinstance(message.get('content'), str) and re.search(r'</?think>', message['content']):
+            text = message['content']
+            close, start = text.find('</think>'), text.find('<think>')
+            if close >= 0 and (start < 0 or start > close):
+                text = '<think>' + text
+            thoughts = [t.strip() for t in re.findall(r'<think>(.*?)(?:</think>|$)', text, flags=re.S) if t.strip()]
+            message = {**message, 'content': re.sub(r'<think>.*?(?:</think>|$)', '', text, flags=re.S).strip()}
+            inline_thinking = '\n\n'.join(thoughts)
         calls = message.get('tool_calls') or []
         if not calls and isinstance(message.get('content'), str):
             text = message['content'].strip()
@@ -583,9 +598,11 @@ class ModelAgent(BaseAgent):
                     raise ValueError('Invalid tool arguments')
                 actions.append({**args, 'action': function.get('name', '')})
             except (ValueError, TypeError):
+                # Never keep malformed arguments in the replayed history: providers reject every later request that carries them.
+                normalized[-1]['function']['arguments'] = '{}'
                 actions.append({'action': 'invalid_tool_arguments'})
         self.last_note = message.get('content') if isinstance(message.get('content'), str) else ''
-        hidden = next((message.get(k) for k in ('reasoning_content', 'reasoning', 'thinking') if isinstance(message.get(k), str) and message.get(k).strip()), '')
+        hidden = next((message.get(k) for k in ('reasoning_content', 'reasoning', 'thinking') if isinstance(message.get(k), str) and message.get(k).strip()), '') or inline_thinking
         self.last_reasoning = hidden.strip()[:100000]
         assistant = {'role': 'assistant', 'content': message.get('content')}
         if normalized:

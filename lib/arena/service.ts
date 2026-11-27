@@ -1,15 +1,20 @@
 import {DEFAULT_BOT_MODE,type BotMode} from './modes.ts';
 import {env} from 'cloudflare:workers';
-import {defaultAgent,DEFAULT_MAX_TOKENS,DEFAULT_STRATEGY,presetCallLimit} from './presets.ts';
-import {addAgent,addEvent,ArenaError,callLimit,createGame,DURATION,durationOf,ensureRunning,intent,MIN_DECISION_GAP_MS,observation,orderBook,publicState,RULES,modeRules,rulesFor,startGame,type AgentSpec,type Game,type Intent} from './engine.ts';
+import {defaultAgent,DEFAULT_AGENTS,DEFAULT_MAX_TOKENS,DEFAULT_STRATEGY,presetCallLimit,type PresetProvider} from './presets.ts';
+import {addAgent,addEvent,ArenaError,callLimit,createGame,DURATION,durationOf,ensureRunning,intent,MIN_DECISION_GAP_MS,observation,orderBook,publicState,RULES,modeRules,rulesFor,startGame,strategyView,type AgentSpec,type Game,type Intent} from './engine.ts';
 import {agentAuth,authenticate,change,insertGame,replayMessages,reserveDefaultCall} from './store.ts';
 import {converse,headerSnapshot,labelParty,labelTicks,leanOrders,leanPosition,leanSnapshot,leanToolResult,partyLabels,READ_TOOLS,readSummary,scriptedCompletion,type ChatMessage,type Completion} from './conversation.ts';
 import {baseline,endpoint,complete,effectiveReasoningEffort,type ModelConfig} from './providers.ts';
+// The shared credential behind arena-provided agents, by provider. It never leaves server code.
+export const presetKey=(provider:PresetProvider)=>provider==='fireworks'?env.FIREWORKS_API_KEY:env.SAIL_API_KEY;
+export const presetsAvailable=()=>DEFAULT_AGENTS.every(a=>!!presetKey(a.provider));
 export async function makeGame(specs:AgentSpec[]=[],seed=42,owner='',durationMs:number|undefined=undefined,botMode:BotMode=DEFAULT_BOT_MODE){const now=Date.now(),g=createGame('game_'+crypto.randomUUID(),crypto.randomUUID()+crypto.randomUUID(),owner,specs,now,seed,undefined,durationMs,botMode);await insertGame(g);return {state:publicState(g,now),revision:0,hostToken:g.hostToken,agentTokens:g.agents.filter(a=>a.id!=='$atlas').map(a=>({id:a.id,name:a.name,token:a.token}))};}
 export function runAction(g:Game,agentToken:string,input:any,now:number){
  const a=agentAuth(g,agentToken);
+ if(input.action==='invalid_tool_arguments')throw new ArenaError('The tool call arguments were not a valid JSON object, so nothing was executed'+(typeof input.reason==='string'&&input.reason?' (received: '+input.reason.slice(0,300)+')':'')+'. Send the call again with complete arguments.');
  if(input.action==='get_rules')return rulesFor(g);
  if(input.action==='get_order_book')return observation(g,a,now);
+ if(input.action==='get_strategy')return strategyView(g,a,now);
  const others=partyLabels(g.agents,a.id);
  if(input.action==='get_position'){const o=observation(g,a,now);return {riskCapacity:o.riskCapacity,position:leanPosition(o.position),openOrders:leanOrders(o.openOrders,o.serverTime)};}
  const limit=(fallback:number,max:number)=>Number.isInteger(input.limit)&&input.limit>=1?Math.min(input.limit,max):fallback;
@@ -59,6 +64,8 @@ export function summarizeAction(action:Intent,outcome:{ok:boolean;result?:any;er
   if(outcome.ok&&outcome.result)Object.assign(summary,{orderId:outcome.result.orderId,status:outcome.result.status,filledQuantity:outcome.result.filledQuantity,averageFillPrice:outcome.result.averageFillPrice,missedFill:marketable&&!outcome.result.filledQuantity});
  }
  if(action.action==='cancel_order')summary.orderId=action.orderId;
+ if(action.action==='set_plan')summary.plan=typeof action.plan==='string'?action.plan.slice(0,600):null;
+ if(action.action==='set_strategy'||action.action==='clear_strategy')Object.assign(summary,{version:outcome.result?.version??null,...(action.action==='set_strategy'?{orders:Array.isArray(action.orders)?action.orders.length:null,maxPosition:action.maxPosition??null}:{})});
  if(!outcome.ok)summary.error=outcome.error;
  return summary;
 }
@@ -77,7 +84,7 @@ export async function decision(id:string,token:string,config:ModelConfig|undefin
   const observed=observation(g,a,now);
   // The model receives only the header; the full observation is available through the read tools.
   journal(a.id,leaseId,0,[{role:'user',content:JSON.stringify(headerSnapshot(observed,previousTurn))}],[config?.apiKey??'']);
-  return {skipped:false,agentId:a.id,preset:a.preset,endsAt:g.endsAt!,rules:rulesFor(g),book:{bestBid:observed.book.bestBid,bestAsk:observed.book.bestAsk} as Book,actions:a.provider==='baseline'?baseline(g,a):null};
+  return {skipped:false,agentId:a.id,preset:a.preset,strategyTools:!!a.strategyTools,endsAt:g.endsAt!,rules:rulesFor(g),book:{bestBid:observed.book.bestBid,bestAsk:observed.book.bestAsk} as Book,actions:a.provider==='baseline'?baseline(g,a):null};
  });
  if(claim.result.skipped)return {...claim,result:{skipped:true}};
  const agentId=claim.result.agentId,deadline=Math.min(claim.result.endsAt,claim.state.now+DECISION_DEADLINE_MS);let totalActions=0,totalRounds=0,inferenceStarted=0,respondedAt=0;
@@ -108,7 +115,9 @@ export async function decision(id:string,token:string,config:ModelConfig|undefin
   return applied.result;
  };
  try{
-  if(claim.result.preset){const p=defaultAgent(claim.result.preset);if(!p||!env.SAIL_API_KEY)throw new ArenaError('The arena’s default Sail agents are unavailable. Add an agent with your own provider key.',503);config={provider:'sail',model:p.model,apiKey:env.SAIL_API_KEY,temperature:.3,maxTokens:p.maxTokens??DEFAULT_MAX_TOKENS,prompt:DEFAULT_STRATEGY,reasoningEffort:p.reasoningEffort};}
+  if(claim.result.preset){const p=defaultAgent(claim.result.preset),apiKey=p&&presetKey(p.provider);if(!p||!apiKey)throw new ArenaError('The arena’s default agents are unavailable. Add an agent with your own provider key.',503);config={provider:p.provider,model:p.model,apiKey,temperature:.3,maxTokens:p.maxTokens??DEFAULT_MAX_TOKENS,prompt:DEFAULT_STRATEGY,reasoningEffort:p.reasoningEffort};}
+  // The plan and strategy tools follow the registered agent, never the client-supplied config.
+  if(config)config={...config,strategyTools:claim.result.strategyTools};
   if(claim.result.actions){if(await beforeCall())await commit(scriptedCompletion(claim.result.actions));}
   else{
    const messages=await replayMessages(id,agentId);

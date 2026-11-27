@@ -11,7 +11,7 @@ export function authenticate(g:Game,token:string|null|undefined,hostOnly=false):
 export function agentAuth(g:Game,token:string|null|undefined){const a=g.agents.find(a=>a.id!=='$atlas'&&!!token&&a.token===token);if(!a)throw new ArenaError('A valid agent token is required.',401);return a;}
 export type Journal=(agentId:string,decisionId:string,step:number,messages:ChatMessage[],secrets?:string[],replays?:(ChatMessage|null)[])=>void;
 // One decision-metrics row: server-measured for website rounds, self-reported for external agents.
-export type DecisionRecord={agentId:string;decisionId:string;round:number;source:'server'|'self_reported';provider?:string|null;model?:string|null;reasoningEffort?:string|null;temperature?:number|null;maxTokens?:number|null;observationTime?:number|null;responseTime?:number|null;executionTime?:number|null;observationRevision?:number|null;executionRevision?:number|null;llmMs?:number|null;executionMs?:number|null;stalenessMs?:number|null;casRetries?:number|null;promptTokens?:number|null;completionTokens?:number|null;observedBestBid?:number|null;observedBestAsk?:number|null;executedBestBid?:number|null;executedBestAsk?:number|null;bookMoved?:boolean|null;late?:boolean|null;actions?:unknown;note?:string|null;reasoning?:string|null};
+export type DecisionRecord={agentId:string;decisionId:string;round:number;source:'server'|'self_reported'|'strategy';provider?:string|null;model?:string|null;reasoningEffort?:string|null;temperature?:number|null;maxTokens?:number|null;observationTime?:number|null;responseTime?:number|null;executionTime?:number|null;observationRevision?:number|null;executionRevision?:number|null;llmMs?:number|null;executionMs?:number|null;stalenessMs?:number|null;casRetries?:number|null;promptTokens?:number|null;completionTokens?:number|null;observedBestBid?:number|null;observedBestAsk?:number|null;executedBestBid?:number|null;executedBestAsk?:number|null;bookMoved?:boolean|null;late?:boolean|null;actions?:unknown;note?:string|null;reasoning?:string|null};
 export type Transaction={attempt:number;revision:number;record:(row:DecisionRecord)=>void};
 const DECISION_COLUMNS='game_id,agent_id,decision_id,round,source,provider,model,reasoning_effort,temperature,max_tokens,observation_time,response_time,execution_time,observation_revision,execution_revision,llm_ms,execution_ms,staleness_ms,cas_retries,prompt_tokens,completion_tokens,observed_best_bid,observed_best_ask,executed_best_bid,executed_best_ask,book_moved,late,actions,note,reasoning,created_at';
 function decisionInsert(gameId:string,d:DecisionRecord,version:number,now:number){
@@ -19,22 +19,29 @@ function decisionInsert(gameId:string,d:DecisionRecord,version:number,now:number
  // The version guard only matches when this transaction's game update won the compare-and-swap.
  return db().prepare(`INSERT INTO arena_decisions (${DECISION_COLUMNS}) SELECT ${DECISION_COLUMNS.split(',').map(()=>'?').join(',')} FROM arena_games WHERE id=? AND version=? ON CONFLICT(game_id,agent_id,decision_id,round) DO NOTHING`).bind(gameId,d.agentId,d.decisionId,d.round,d.source,s(d.provider),s(d.model),s(d.reasoningEffort),n(d.temperature),n(d.maxTokens),n(d.observationTime),n(d.responseTime),n(d.executionTime),n(d.observationRevision),n(d.executionRevision),n(d.llmMs),n(d.executionMs),n(d.stalenessMs),n(d.casRetries),n(d.promptTokens),n(d.completionTokens),n(d.observedBestBid),n(d.observedBestAsk),n(d.executedBestBid),n(d.executedBestAsk),b(d.bookMoved),b(d.late),d.actions==null?null:JSON.stringify(d.actions).slice(0,20000),typeof d.note==='string'&&d.note.trim()?d.note.trim().slice(0,600):null,typeof d.reasoning==='string'&&d.reasoning.trim()?d.reasoning.trim().slice(0,100000):null,now,gameId,version);
 }
+// Strategy ticks that acted while the clock advanced become decision rows with source "strategy": one row per agent
+// per tick, with no model timing, so they never enter latency or staleness statistics. The buffer is not persisted.
+function drainStrategyRows(g:Game):DecisionRecord[]{
+ const out=g.autoOut??[];delete g.autoOut;
+ return out.map(r=>({agentId:r.agentId,decisionId:'strategy:'+r.time,round:0,source:'strategy' as const,executionTime:r.time,observedBestBid:r.bestBid,observedBestAsk:r.bestAsk,late:false,actions:r.actions,note:'strategy v'+r.version}));
+}
 export async function change<T>(id:string,fn:(g:Game,now:number,journal:Journal,tx:Transaction)=>T|Promise<T>,clock:()=>number=Date.now):Promise<{result:T;state:ReturnType<typeof publicState>;revision:number;attempts:number}> {
  if(typeof id!=='string'||!/^game_[a-f0-9-]{36}$/.test(id))throw new ArenaError('Invalid game ID.');
  for(let i=0;i<20;i++){
   const row=await db().prepare('SELECT state,version FROM arena_games WHERE id=?').bind(id).first<{state:string;version:number}>();
   if(!row)throw new ArenaError('Game not found.',404);
   const g=JSON.parse(row.state) as Game,now=clock();advance(g,now);
-  const pending:{agentId:string;decisionId:string;step:number;message:string;replay:string|null}[]=[],decisions:DecisionRecord[]=[];
+  const pending:{agentId:string;decisionId:string;step:number;message:string;replay:string|null}[]=[],decisions:DecisionRecord[]=drainStrategyRows(g);
   const journal:Journal=(agentId,decisionId,step,messages,secrets=[],replays=[])=>{const a=g.agents.find(a=>a.id===agentId)!;if(!a)throw new ArenaError('Unknown history owner.');const all=[...secrets,g.hostToken,...g.agents.map(a=>a.token)];for(const [offset,message] of messages.entries())pending.push({agentId,decisionId,step:step+offset,message:JSON.stringify(redactMessage(message,all)),replay:replays[offset]?JSON.stringify(redactMessage(replays[offset]!,all)):null});a.historyMessages=(a.historyMessages??0)+messages.length;};
   const tx:Transaction={attempt:i,revision:row.version+1,record:entry=>{decisions.push(entry);}};
   // Even a rejected late order must persist deadline finalization.
   let result!:T,error:unknown;try{result=await fn(g,now,journal,tx);}catch(e){error=e;}
   if(error){
    const original=JSON.parse(row.state) as Game;
-   advance(original,now);
+   advance(original,now);const ticked=drainStrategyRows(original);
    if(JSON.stringify(original)===row.state)throw error;
-   const write=await db().prepare('UPDATE arena_games SET state=?,version=version+1,status=?,ends_at=? WHERE id=? AND version=?').bind(JSON.stringify(original),original.status,original.endsAt,id,row.version).run();
+   const update=db().prepare('UPDATE arena_games SET state=?,version=version+1,status=?,ends_at=? WHERE id=? AND version=?').bind(JSON.stringify(original),original.status,original.endsAt,id,row.version);
+   const write:D1Result=ticked.length?(await db().batch([update,...ticked.map(entry=>decisionInsert(id,entry,row.version+1,now))]))[0]:await update.run();
    if(write.meta.changes===1)throw error;
   }else{
    const serialized=JSON.stringify(g);
@@ -56,7 +63,7 @@ export async function change<T>(id:string,fn:(g:Game,now:number,journal:Journal,
 
 // Atomic shared-key allowance, independent of game count and client tokens.
 export async function reserveDefaultCall(now=Date.now()){
- const day=new Date(now).toISOString().slice(0,10),configured=Number(env.SAIL_DEFAULT_DAILY_CALL_LIMIT),limit=Number.isInteger(configured)&&configured>0&&configured<=100000?configured:3000;
+ const day=new Date(now).toISOString().slice(0,10),configured=Number(env.ARENA_DEFAULT_DAILY_CALL_LIMIT??env.SAIL_DEFAULT_DAILY_CALL_LIMIT),limit=Number.isInteger(configured)&&configured>0&&configured<=100000?configured:3000;
  const row=await db().prepare('INSERT INTO arena_default_usage (day,calls) VALUES (?,1) ON CONFLICT(day) DO UPDATE SET calls=calls+1 WHERE calls<? RETURNING calls').bind(day,limit).first<{calls:number}>();
  if(!row)throw new ArenaError('The arena-provided agents have reached today’s shared allowance. Add an agent with your own provider key, or try tomorrow.',429);
 }
